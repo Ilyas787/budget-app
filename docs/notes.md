@@ -27,6 +27,128 @@ Une section par sujet, la plus récente en haut de chaque section.
 
 ---
 
+## Modélisation de la base de données
+
+### Les 5 tables de la V1 (séance 2, version de travail)
+
+```
+users
+- id : UUID, clé primaire
+- email : texte, obligatoire, UNIQUE
+- password_hash : texte, obligatoire      (jamais le mot de passe en clair, seulement l'empreinte BCrypt)
+- display_name : texte, obligatoire        (ou nom + prénom : choix à trancher, cf. minimisation RGPD)
+- created_at : TIMESTAMPTZ, défaut now()
+
+accounts
+- id : UUID
+- user_id → users, obligatoire
+- name : texte, obligatoire               (« Compte courant », « Livret A »)
+- type : COURANT / EPARGNE / ESPECES      (CHECK)
+- currency : CHAR(3), défaut 'EUR'
+- initial_balance : NUMERIC(12,2), défaut 0
+- created_at : TIMESTAMPTZ
+- UNIQUE (user_id, name)
+
+categories
+- id : UUID
+- user_id → users, obligatoire
+- name : texte, obligatoire               (« Courses », « Loyer », « Salaire »)
+- kind : DEPENSE / REVENU                  (CHECK)
+- color : texte, optionnel
+- UNIQUE (user_id, name)
+
+transactions
+- id : UUID
+- user_id → users, obligatoire
+- account_id → accounts, obligatoire
+- category_id → categories, OPTIONNEL     (« non catégorisée » → futur job de l'IA)
+- kind : DEPENSE / REVENU
+- amount : NUMERIC(12,2), CHECK (amount > 0)
+- date : DATE                              (jour de l'opération)
+- label : texte, obligatoire
+- note : texte, optionnel
+- created_at : TIMESTAMPTZ                 (moment de la saisie)
+
+budgets
+- id : UUID
+- user_id → users, obligatoire
+- category_id → categories, obligatoire
+- month : DATE (toujours le 1er du mois)
+- amount_limit : NUMERIC(12,2), CHECK (> 0)
+- UNIQUE (user_id, category_id, month)     (un seul budget par catégorie et par mois)
+```
+
+**Les liens**
+```
+users 1 ──< N accounts
+users 1 ──< N categories
+users 1 ──< N transactions
+users 1 ──< N budgets
+accounts   1 ──< N transactions
+categories 1 ──< N transactions   (côté transaction : optionnel)
+categories 1 ──< N budgets
+```
+
+### Règle 1 : jamais de `float` / `double` pour de l'argent
+- Les flottants sont **approximatifs** : en Java, `0.1 + 0.2 = 0.30000000000000004`. Sur des milliers d'opérations, des centimes se perdent.
+- En base : `NUMERIC(12,2)` (nombre exact, 2 décimales, jusqu'à 9 999 999 999,99).
+- En Java : `BigDecimal` (et comparer avec `compareTo`, pas `equals` : `2.0` et `2.00` ne sont pas `equals`).
+- Question d'entretien très classique.
+
+### Règle 2 : une information à un seul endroit
+- Si une info est stockée deux fois, un jour les deux versions se contredisent.
+- **Le solde d'un compte n'est pas stocké** : solde = `initial_balance` + revenus − dépenses, calculé depuis les transactions.
+  Stocker le solde obligerait à le mettre à jour à chaque transaction ; une mise à jour ratée = solde faux pour toujours.
+- **La devise est sur le compte, pas sur la transaction** : une transaction hérite de la devise de son compte.
+- Exception assumée : `user_id` est répété sur toutes les tables (on pourrait le retrouver via le compte).
+  C'est volontaire : chaque requête filtre simplement `WHERE user_id = <moi>` → sécurité plus simple (anti-IDOR).
+  Une redondance doit toujours être un **choix conscient et justifié**, jamais un accident.
+
+### Règle 3 : la clé étrangère est toujours du côté « plusieurs »
+- Un compte a plusieurs transactions → c'est `transactions` qui a une colonne `account_id`.
+- `accounts` n'a **pas** de colonne « transactions » : une colonne SQL contient une seule valeur, pas une liste.
+- Pour avoir les transactions d'un compte : `SELECT * FROM transactions WHERE account_id = ...`.
+
+### Les types de relations
+| Relation | Exemple | Comment en SQL |
+| --- | --- | --- |
+| **Un à plusieurs** (1-N) | un compte → plusieurs transactions | clé étrangère côté « plusieurs » (`transactions.account_id`) |
+| **Un à un** (1-1) | un user → un seul profil détaillé | clé étrangère + `UNIQUE` dessus (rare) |
+| **Plusieurs à plusieurs** (N-N) | transactions ↔ tags (une transaction a 0..n tags, un tag est sur n transactions) | une **table de liaison** `transaction_tags(transaction_id, tag_id)` |
+
+**Comment trouver le bon type** : se poser la question **dans les deux sens**.
+- « Une transaction a combien de catégories ? » → 1 (ou 0). « Une catégorie a combien de transactions ? » → plein. ⇒ **plusieurs à un**.
+- Si la réponse est « plein » dans les deux sens → plusieurs à plusieurs → table de liaison.
+- Si c'est « 1 » dans les deux sens → un à un (vérifier que ce n'est pas juste la même table).
+
+**Piège (ma réflexion de la séance 2)** : une transaction avec un débiteur et un créditeur, ce n'est **pas** du plusieurs à plusieurs.
+C'est **deux** clés étrangères vers la même table (`from_account_id`, `to_account_id`), chacune « plusieurs à un ».
+Le nombre de comptes par transaction est fixe (2), pas variable → pas de table de liaison.
+(C'est l'idée de la comptabilité en partie double : chaque mouvement a un débit et un crédit.)
+
+### Choix de conception à savoir défendre
+- **Montant toujours positif + `kind` (DEPENSE / REVENU)** plutôt qu'un montant signé : plus lisible, et la base l'impose (`CHECK (amount > 0)`).
+- **`date` ≠ `created_at`** : la date de l'opération (samedi) n'est pas la date de saisie (lundi).
+- **Catégorie optionnelle sur une transaction** : permet les transactions « non catégorisées » (import CSV, puis catégorisation par l'IA).
+- **Budget lié à une catégorie + un mois, pas à un compte** : « 300 € de courses en octobre », quel que soit le compte qui paie.
+  `month` = toujours le 1er du mois, et `UNIQUE (user_id, category_id, month)` empêche deux budgets pour la même chose.
+- **Catégories copiées par utilisateur** (à l'inscription) plutôt que partagées : pas de cas particulier « catégorie système ».
+- **Virements internes (courant → livret) : pas en V1.** Deux options plus tard :
+  ajouter un `to_account_id` optionnel, ou créer deux transactions liées (une dépense + un revenu).
+- **`password_hash`** et pas `password` : le nom protège contre l'erreur de stocker un mot de passe en clair.
+- **Minimisation des données (RGPD)** : ne stocker que ce dont l'appli a besoin (un `display_name` plutôt que nom + prénom ?).
+
+### Les contraintes SQL utilisées
+- `PRIMARY KEY` : identifiant unique de la ligne.
+- `NOT NULL` : colonne obligatoire, garantie **par la base**, pas seulement par le Java.
+- `UNIQUE` / `UNIQUE (a, b)` : pas de doublon (sur une colonne ou une combinaison).
+- `REFERENCES autre_table(id)` : clé étrangère, impossible de pointer vers une ligne qui n'existe pas.
+- `CHECK (condition)` : règle métier imposée par la base (`amount > 0`, `type IN ('COURANT', ...)`).
+- `DEFAULT valeur` : valeur si on n'en donne pas (`now()`, `'EUR'`, `0`).
+- Principe : **mettre les règles dans la base**. Le code peut avoir un bug, la base refusera quand même une donnée invalide.
+
+---
+
 ## Java
 
 ### Lombok et les records (séance 2)
