@@ -29,6 +29,89 @@ Une section par sujet, la plus récente en haut de chaque section.
 
 ## Modélisation de la base de données
 
+### Décisions finales du schéma (séance 3)
+
+Le schéma de la séance 2 (plus bas) reste la base ; voici les choix tranchés et leur justification.
+
+**`users`**
+- `display_name` seul, pas de nom + prénom : l'appli en a besoin uniquement pour afficher « Salut Ilyas ».
+  **Minimisation RGPD** : une donnée qu'on ne stocke pas ne peut pas fuiter.
+- Ids en **UUID** (v4, généré par Postgres avec `gen_random_uuid()`) : 122 bits aléatoires, générables n'importe où sans demander à la base.
+  - Avantages : impossible à deviner / énumérer (`/accounts/42` → `/accounts/43`), ne révèle pas le nombre d'utilisateurs.
+  - ⚠️ **Le UUID ne protège PAS de l'IDOR.** La vraie protection reste `findByIdAndUserId(id, moi)`. Le UUID est une couche en plus (**défense en profondeur**).
+  - Coût : 16 octets au lieu de 8, illisible, index rempli dans le désordre (le UUID v7, trié par date, corrige ça ; Postgres 17 ne fait que du v4).
+- `created_at` en **`TIMESTAMPTZ`** : stocke un **instant** (converti en UTC), même sens sur mon Mac à Paris et sur un serveur AWS en UTC.
+  `TIMESTAMP` = une heure sans fuseau, ambiguë. Malgré le nom, `TIMESTAMPTZ` ne garde pas le fuseau d'origine. En Java : `Instant`.
+- **Email** : pour Postgres, `Ilyas@gmail.com` ≠ `ilyas@gmail.com`, donc `UNIQUE` seul laisse passer les deux (= deux comptes pour la même personne).
+  - Java normalise : `email.trim().toLowerCase()` à l'inscription **et** au login.
+  - La base garantit : `CHECK (email = lower(email))` (+ `UNIQUE(email)` normal).
+  - Alternative : index unique sur `lower(email)`, utile quand on ne maîtrise pas les données qui arrivent en base.
+  - Phrase d'entretien : « Je normalise côté appli, et la base garantit la règle avec un CHECK. »
+
+**`accounts`**
+- **Pas de colonne solde** : « Le solde se déduit des transactions. Le stocker créerait une deuxième **source de vérité** qui peut se contredire au moindre oubli dans le code (créer, modifier, changer de compte, supprimer…). Donc on le calcule. »
+  Prix : un `SUM` à l'affichage (quelques ms avec un index). Stocker un calcul pour la perf = **dénormalisation**, à faire seulement comme choix conscient.
+  (Ne pas confondre avec l'**atomicité** « crédité d'un côté, pas débité de l'autre » : ça, c'est `@Transactional`.)
+- `UNIQUE (user_id, name)` = **contrainte d'unicité composite** : l'unicité porte sur la combinaison.
+  Moi et ma sœur pouvons chacun avoir un « Compte courant », mais pas moi deux fois.
+  Postgres crée un index `(user_id, name)` ; un index composite sert aussi pour sa **1re** colonne seule (`WHERE user_id = ?`), pas pour la 2e seule.
+- `type` gardé : **texte libre pour l'humain** (`name` : « Cagnotte »), **valeur contrôlée pour le code** (`type` : `GROUP BY`, icônes, règles futures comme plafond / intérêts). Même logique pour `kind`.
+- `currency CHAR(3)` : code **ISO 4217** (`EUR`, `USD`, `MAD`), toujours 3 lettres.
+
+**Restreindre une colonne à une liste de valeurs (`type`, `kind`)**
+
+| Option | Pour | Contre |
+| --- | --- | --- |
+| `CHECK (type IN (...))` ✅ choisi | simple, Hibernate sans config | changer la liste = supprimer + recréer la contrainte |
+| `ENUM` Postgres (`CREATE TYPE ... AS ENUM`) | ajouter une valeur facile | retirer / renommer pénible, config Hibernate en plus |
+| Table de référence + FK | valeurs avec données (libellé, couleur), ajout sans migration | jointure en plus ; c'est le cas des **catégories** |
+
+- Côté Java : `enum` + `@Enumerated(EnumType.STRING)`. **Jamais `ORDINAL`** (stocke 0, 1, 2 : insérer une valeur dans l'enum change le sens des données).
+- **Nommer ses contraintes** : `CONSTRAINT accounts_type_chk CHECK (...)`, pour pouvoir les supprimer plus tard.
+- **Flyway : on ne modifie JAMAIS une migration déjà appliquée** (checksum dans `flyway_schema_history`, l'appli refuse de démarrer).
+  Ajouter `CARTE_CREDIT` = nouvelle migration `V2__...sql` qui supprime et recrée la contrainte.
+
+**`categories`**
+- **Copiées par utilisateur** à l'inscription plutôt que partagées (`user_id = NULL`) : pas de cas particulier dans le filtre anti-IDOR
+  (sinon `user_id = moi OU user_id IS NULL`, + règle « lecture seule »), et chacun peut renommer / recolorer. Coût : ~10 lignes par user.
+- `kind` sur la catégorie : à quel type de transaction elle sert → la liste « nouvelle dépense » ne propose pas « Salaire », pas de budget sur un revenu.
+
+**`transactions`**
+- **Montant toujours > 0 + `kind`** plutôt que montant signé. Les deux sont défendables :
+  signé = solde plus simple (`initial + SUM(amount)`), colle aux relevés CSV, gère bien les remboursements ;
+  `kind` = sens écrit en toutes lettres (enum Java), pas de convention « négatif = sortie » à connaître. **Choix : `kind`.**
+- `kind` **sur la transaction ET sur la catégorie** : obligatoire sur la transaction car `category_id` est **optionnel** (sinon une transaction sans catégorie n'a pas de sens).
+  Duplication voulue ; incohérence possible acceptée (ex. remboursement Zara = REVENU rangé dans « Vêtements » qui est DEPENSE).
+- **`date` ≠ `created_at`** : courses samedi 31/10 saisies lundi 02/11 → `date` = 31/10 (compte dans le budget d'octobre), `created_at` = l'instant de saisie (technique).
+- **Un jour → `DATE`, un instant → `TIMESTAMPTZ`.** Un 1er novembre stocké en `TIMESTAMPTZ` = 01/11 00h Paris = 31/10 23h UTC → rangé en octobre côté serveur.
+- Index `(user_id, date)` : la requête la plus fréquente = mes transactions par date / par mois.
+
+**Anti-IDOR en écriture : FK composites**
+- Problème : `account_id REFERENCES accounts(id)` vérifie que le compte **existe**, pas **à qui il est**.
+  Ma sœur (B) peut faire `POST /transactions` avec l'id de mon compte → ligne `(user B, compte A, 500 €)` acceptée → mon solde faussé ou transaction « fantôme ».
+- **Java (obligatoire)** : vérifier `findByIdAndUserId(accountId, moi)` (et `categoryId`) à la création **et à la modification** (PUT qui change de compte) → 404.
+- **Base (le filet)** :
+  ```sql
+  -- dans accounts et categories
+  UNIQUE (id, user_id)
+  -- dans transactions
+  FOREIGN KEY (account_id, user_id)  REFERENCES accounts (id, user_id)
+  FOREIGN KEY (category_id, user_id) REFERENCES categories (id, user_id)
+  -- dans budgets
+  FOREIGN KEY (category_id, user_id) REFERENCES categories (id, user_id)
+  ```
+  Si une colonne de la FK est `NULL` (transaction sans catégorie), Postgres ne vérifie pas → l'optionnel marche.
+- Pourquoi les deux : chaque chemin d'écriture (POST, PUT, import CSV en V2, données de démo, script SQL) doit penser au contrôle Java ; la contrainte s'écrit **une fois** et protège tout, même le code pas encore écrit.
+- Phrase d'entretien : « Le filtre par utilisateur est fait dans le service, et la base le garantit avec des clés étrangères composites. »
+
+**`budgets`**
+- Lié à une catégorie + un mois, **pas à un compte** : 300 € de courses, payées en carte ou en espèces.
+- `CONSTRAINT budgets_month_first_day_chk CHECK (EXTRACT(DAY FROM month) = 1)` : sinon `2026-10-01` et `2026-10-15` contournent le `UNIQUE (user_id, category_id, month)` → deux budgets « Courses » en octobre.
+- Limite : un `CHECK` ne voit que **sa propre ligne**, il ne peut pas vérifier dans `categories` que la catégorie est une DEPENSE → règle portée par le Java.
+
+**Reste à trancher en écrivant `V1__init.sql`** : ordre de création des tables, `ON DELETE` de chaque FK.
+
+
 ### Les 5 tables de la V1 (séance 2, version de travail)
 
 ```
