@@ -109,7 +109,26 @@ Le schéma de la séance 2 (plus bas) reste la base ; voici les choix tranchés 
 - `CONSTRAINT budgets_month_first_day_chk CHECK (EXTRACT(DAY FROM month) = 1)` : sinon `2026-10-01` et `2026-10-15` contournent le `UNIQUE (user_id, category_id, month)` → deux budgets « Courses » en octobre.
 - Limite : un `CHECK` ne voit que **sa propre ligne**, il ne peut pas vérifier dans `categories` que la catégorie est une DEPENSE → règle portée par le Java.
 
-**Reste à trancher en écrivant `V1__init.sql`** : ordre de création des tables, `ON DELETE` de chaque FK.
+**`ON DELETE` : que faire des lignes qui pointent vers une ligne supprimée ?**
+
+| Option | Ce que fait la base |
+| --- | --- |
+| `RESTRICT` / `NO ACTION` (défaut) | refuse la suppression (erreur) |
+| `CASCADE` | supprime aussi les lignes qui pointent dessus |
+| `SET NULL` | garde les lignes, vide leur FK |
+
+- Suppression d'une catégorie → `transactions.category_id` : **`SET NULL`**. Les transactions = l'historique et le solde, on n'y touche pas ; elles deviennent « non catégorisées ».
+  ⚠️ Avec la FK composite `(category_id, user_id)`, un `SET NULL` simple viderait aussi `user_id` (NOT NULL → erreur). Écrire **`ON DELETE SET NULL (category_id)`** (Postgres 15+).
+- Suppression d'une catégorie → `budgets.category_id` : **`CASCADE`**. Un budget est un objectif lié à la catégorie, sans elle il ne veut plus rien dire.
+- Règle : **historique (de l'argent qui a vraiment bougé) → on garde ; objectif rattaché → on supprime avec.**
+- À trancher : suppression d'un **compte** (ses transactions ?) et d'un **user** (RGPD, droit à l'effacement).
+
+**Postgres n'indexe PAS les clés étrangères**
+- `PRIMARY KEY` et `UNIQUE` créent un index automatiquement, une FK non.
+- Sans index, `WHERE account_id = ...` et le `SET NULL` / `CASCADE` lisent toute la table.
+- Réflexe : pour chaque FK, se demander si elle est déjà couverte par un index existant (un index composite sert pour sa 1re colonne), sinon en créer un.
+
+**Reste à trancher en écrivant `V1__init.sql`** : ordre de création des tables, `ON DELETE` du compte et du user, index sur les FK.
 
 
 ### Les 5 tables de la V1 (séance 2, version de travail)
@@ -233,6 +252,53 @@ Le nombre de comptes par transaction est fixe (2), pas variable → pas de table
 ---
 
 ## Java
+
+### Relations JPA (séance 3)
+
+**L'idée** : en SQL, une relation = une seule colonne FK du côté « plusieurs ». En Java on manipule des objets
+(`transaction.getAccount().getName()`), JPA fait le pont :
+```java
+// dans Transaction
+@ManyToOne
+@JoinColumn(name = "account_id")   // la colonne FK en base
+private Account account;           // un objet, pas un UUID
+```
+
+**Lire le nom de l'annotation** : le 1er mot = la classe où je suis, le 2e = le champ.
+`@ManyToOne` dans `Transaction` = « **plusieurs** transactions → **un** compte ».
+
+| Champ | Annotation |
+| --- | --- |
+| `Transaction.account` | `@ManyToOne` |
+| `Transaction.category` | `@ManyToOne` (pas `@OneToOne` !) |
+| `Budget.category` | `@ManyToOne` |
+| `Account.user` | `@ManyToOne` |
+| `Account.transactions` (liste) | `@OneToMany(mappedBy = "account")` |
+
+**Mon erreur** : `Transaction.category` en `@OneToOne`, parce que j'ai regardé dans un seul sens (« une transaction a une catégorie »).
+Toujours poser la question **dans les deux sens** : une catégorie a combien de transactions ? Plein → `@ManyToOne`.
+Un vrai `@OneToOne` = chaque catégorie ne servirait qu'à une seule transaction (rare : un user et sa photo de profil).
+
+**Côté propriétaire / côté inverse**
+- Une seule colonne en base, mais on peut avoir un champ des deux côtés en Java (relation **bidirectionnelle**).
+- Le `@ManyToOne` (avec `@JoinColumn`) est le **propriétaire** : c'est lui qui écrit la FK.
+- Le `@OneToMany(mappedBy = "account")` est le côté **inverse** : « c'est le champ `account` de l'autre classe qui gère », lecture seule.
+- Un seul côté déclaré = relation **unidirectionnelle**.
+
+**Pourquoi pas de `@OneToMany` dans le projet**
+- `account.getTransactions()` ressemble à un simple getter, mais JPA lance en cachette
+  `SELECT * FROM transactions WHERE account_id = ...` → 5 000 objets chargés pour rien, et rien dans le code ne le montre.
+- Avec le repository, la requête est visible et limitée :
+  `transactionRepository.findByAccountIdAndUserId(accountId, userId, PageRequest.of(0, 20))`.
+- Phrase d'entretien : « J'évite le `@OneToMany` parce qu'un simple getter peut charger toute une collection sans que ça se voie dans le code.
+  Quand j'ai besoin du côté "plusieurs", je passe par le repository, avec une pagination. »
+- Nuance : acceptable quand le « plusieurs » est **petit** et **toujours** utile avec le parent (une commande et ses 3 lignes).
+- **Choix du projet : relations unidirectionnelles, seulement des `@ManyToOne`.**
+
+**À voir en séance 4, avec les requêtes SQL affichées dans la console** : `LAZY` / `EAGER`
+(⚠️ `@ManyToOne` est `EAGER` par défaut → écrire `@ManyToOne(fetch = FetchType.LAZY)`), le problème N+1, `LazyInitializationException`.
+
+---
 
 ### Lombok et les records (séance 2)
 
