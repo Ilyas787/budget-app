@@ -15,3 +15,8 @@
 - Fait : pas de SQL écrit (choix assumé) ; schéma revu table par table avec la justification de chaque choix (notes.md « Décisions finales du schéma ») ; décisions : display_name seul, email en minuscules (CHECK), kind gardé, FK composites, CHECK 1er du mois sur budgets ; 2 ON DELETE tranchés ; bases des relations JPA
 - Bloqué / appris : UUID ≠ protection anti-IDOR (défense en profondeur) ; TIMESTAMPTZ = un instant, DATE = un jour ; pas de colonne solde (une seule source de vérité) ; FK simple ne vérifie pas le propriétaire → FK composites ; `@OneToOne` vs `@ManyToOne` (poser la question dans les deux sens) ; `@OneToMany` cache une requête → repository + pagination ; Postgres n'indexe pas les FK
 - Prochaine séance (mer. 19h) : trancher les ON DELETE du compte et du user, puis écrire V1__init.sql (ordre des tables, gen_random_uuid(), contraintes nommées, index sur les FK), le relire avec Claude, l'appliquer
+
+## 2026-10-07 · Séance 4
+- Fait : ON DELETE restants tranchés (user → CASCADE pour le RGPD, compte → NO ACTION) ; `V1__init.sql` commencé : `users`, `accounts`, `categories` écrites à la main et relues ; `.gitignore` protège le PDF du plan (repo public)
+- Bloqué / appris : écrire du SQL sans pgAdmin (CREATE TABLE, CONSTRAINT, REFERENCES) ; gen_random_uuid() ; TEXT vs VARCHAR ; INT arrondit l'argent en silence → NUMERIC(12,2) ; ordre des colonnes d'un index composite (l'annuaire) ; UNIQUE (id, user_id) = exigence technique des FK composites ; NO ACTION vs RESTRICT
+- Prochaine séance (sam. 10h30) : écrire `transactions` (2 FK composites, SET NULL (category_id), index (user_id, date)) puis `budgets`, index sur les FK, appliquer la migration et vérifier dans pgAdmin. Ne PAS lancer l'appli avant.

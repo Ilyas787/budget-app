@@ -12,3 +12,6 @@ target/
 node_modules/
 dist/
 .angular/
+
+# Plan perso (infos personnelles, repo public)
+*plan complet*.pdf

@@ -29,6 +29,69 @@ Une section par sujet, la plus récente en haut de chaque section.
 
 ## Modélisation de la base de données
 
+### Écrire la migration `V1__init.sql` (séance 4)
+
+**Pourquoi un fichier SQL plutôt que pgAdmin** : une table créée par clics n'existe que dans ma base locale.
+Le fichier est versionné avec le code et Flyway l'applique partout (mon Mac, Testcontainers, CI, AWS) : le schéma devient du code.
+pgAdmin reste utile pour **regarder** les tables une fois la migration appliquée (`localhost:5432`).
+
+| Dans pgAdmin | En SQL |
+| --- | --- |
+| Create → Table | `CREATE TABLE nom (...);` |
+| une ligne de l'onglet Columns | `nom_colonne TYPE,` |
+| case « Not NULL? » | `NOT NULL` (sans = colonne optionnelle) |
+| champ « Default » | `DEFAULT valeur` |
+| case « Primary key? » | `PRIMARY KEY` |
+| Constraints → Unique / Check | `CONSTRAINT nom UNIQUE (col)` / `CONSTRAINT nom CHECK (condition)` |
+| Constraints → Foreign Key | `REFERENCES autre_table (col) ON DELETE ...` sur la ligne de la colonne |
+
+**Pièges de syntaxe rencontrés**
+- Une virgule entre chaque ligne, **pas** après la dernière ; un `;` à la fin de chaque `CREATE TABLE`.
+- `TIMESTAMPTZ` (pas `TIMESTAMPZ`).
+- Un `CHECK` contient une **condition** vrai/faux : `CHECK (lower(email) = email)`, pas `CHECK (email)`. Pour une liste : `CHECK (type IN ('A', 'B'))`.
+- Convention : mots-clés SQL en MAJUSCULES, noms en minuscules (Postgres met de toute façon les noms en minuscules).
+- Nommer les contraintes `table_colonne_type` : `users_email_uq`, `accounts_type_chk`.
+- Une FK s'appelle `<entité au singulier>_id` : `user_id`, pas `users_id`. Un même nom partout (`email` en base = en Java = en JSON).
+
+**Ordre des tables** : une table ne peut pointer que vers des tables déjà créées
+(sinon `relation "accounts" does not exist` et Flyway annule tout) → `users` → `accounts`, `categories` → `transactions`, `budgets`.
+
+**UUID** : `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` (intégré depuis Postgres 13, UUID v4).
+
+**Texte** : en Postgres, `TEXT` et `VARCHAR(n)` sont stockés pareil (mêmes perfs), `(n)` ajoute juste une limite.
+Choix du projet : `TEXT` partout, longueur validée en Java (`@Size`). Un email peut faire 254 caractères (64 = seulement la partie avant le `@`).
+
+**Argent** : `INT` arrondit **en silence** (1 234,56 → 1 235). Toujours `NUMERIC(12,2)`.
+`initial_balance` sans `CHECK (> 0)` : un compte peut démarrer à découvert.
+
+**Ordre des colonnes d'un index composite (l'annuaire)** : un annuaire trié par (nom, prénom) trouve vite tous les « Dupont », jamais toutes les « Marie ».
+`UNIQUE (user_id, name)` range les lignes d'un même user ensemble → sert aussi à `WHERE user_id = ?`. `(name, user_id)` ne servirait à rien pour ça.
+
+**`UNIQUE (id, user_id)` : redondant pour la logique, nécessaire pour la technique**
+- `id` est unique, donc le couple l'est forcément : aucune règle métier en plus.
+- Mais Postgres exige qu'une FK pointe vers des colonnes avec **exactement** un `UNIQUE` / `PRIMARY KEY` déclaré
+  (sinon `there is no unique constraint matching given keys`) : il lui faut un index sur ce couple pour vérifier vite.
+- À mettre sur chaque table **cible** d'une FK composite : `accounts` et `categories`.
+- Exemple : accounts = (A1, ilyas), (B1, sœur). Transaction (user sœur, compte A1) → couple (A1, sœur) absent → refusée.
+
+**Les `ON DELETE` restants**
+- `transactions.account_id` : refus (on ne supprime pas un compte qui a des transactions). Dans le doute, **l'option qu'on peut assouplir plus tard** :
+  passer en `CASCADE` = migration de 2 lignes ; des données effacées = perdues pour toujours.
+  `CASCADE` + confirmation forte côté front se défend aussi → noté dans `idees.md` pour novembre.
+- Tous les `user_id` : `CASCADE`. RGPD, droit à l'effacement : les données appartiennent au user, s'il demande la suppression on efface tout (les garder serait illégal).
+- ⚠️ **`NO ACTION` plutôt que `RESTRICT`** : supprimer un user fait cascader comptes + transactions dans la même opération.
+  `RESTRICT` vérifie immédiatement et peut bloquer selon l'ordre de la cascade ; `NO ACTION` (le défaut, on n'écrit rien) vérifie à la **fin** de l'opération → passe.
+
+| FK | `ON DELETE` |
+| --- | --- |
+| tous les `user_id` | `CASCADE` |
+| `transactions.account_id` | rien (défaut `NO ACTION` = refus) |
+| `transactions.category_id` | `SET NULL (category_id)` |
+| `budgets.category_id` | `CASCADE` |
+
+**Flyway : ne pas lancer l'appli tant que `V1__init.sql` n'est pas fini.** Une fois appliqué, le fichier est figé (checksum).
+Si ça arrive en dev : `docker compose down -v` (efface la base) puis relancer.
+
 ### Décisions finales du schéma (séance 3)
 
 Le schéma de la séance 2 (plus bas) reste la base ; voici les choix tranchés et leur justification.
