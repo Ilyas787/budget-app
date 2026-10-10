@@ -27,7 +27,402 @@ Une section par sujet, la plus récente en haut de chaque section.
 
 ---
 
+## Modélisation de la base de données
+
+### Finir et appliquer `V1__init.sql` (séance 5)
+
+**FK simple ou composite : d'où vient la valeur ?**
+
+| Colonne | Qui fournit la valeur ? | Pointe vers quelque chose qui a un propriétaire ? | FK |
+| --- | --- | --- | --- |
+| `user_id` | le backend (token de l'utilisateur connecté) | non, c'est le propriétaire | simple, sur la ligne : `REFERENCES users (id) ON DELETE CASCADE` |
+| `account_id` | le client (JSON de la requête) | oui | composite, en bas de la table |
+| `category_id` | le client (JSON de la requête) | oui | composite, en bas de la table |
+
+- Règle : **FK vers une ressource qui a son propre propriétaire → composite. FK vers le propriétaire lui-même → simple.**
+- Le `REFERENCES` sur la ligne d'une colonne ne porte que sur cette colonne. Pour un couple :
+  ```sql
+  CONSTRAINT transactions_account_fk FOREIGN KEY (account_id, user_id) REFERENCES accounts (id, user_id)
+  ```
+  Les parenthèses vont **par paires, dans l'ordre** : `account_id` ↔ `id`, `user_id` ↔ `user_id` (dans la même ligne de `accounts`).
+- `ON DELETE SET NULL` tout court sur une FK composite vide **toutes** ses colonnes (dont `user_id`, NOT NULL → erreur) → `ON DELETE SET NULL (category_id)`.
+
+**Pas de `DEFAULT` sans valeur « naturelle »**
+- `amount DEFAULT 0` + `CHECK (amount > 0)` : le défaut serait toujours refusé, il ne sert à rien et trompe le lecteur.
+- Sans `DEFAULT`, un `INSERT` sans montant échoue clairement (`violates not-null constraint`) : le montant doit toujours être fourni.
+- `created_at` (maintenant) et `currency` (EUR) ont une valeur naturelle → `DEFAULT` justifié.
+
+**Deux sortes de `UNIQUE`**
+
+| Sorte | Rôle | Contient `id` ? | Exemples |
+| --- | --- | --- | --- |
+| règle métier | empêcher un doublon | **jamais** (sinon elle ne bloque rien, `id` est déjà unique) | `users_email_uq`, `accounts_name_uq (user_id, name)`, `budgets_user_category_month_uq` |
+| technique | cible d'une FK composite | oui | `accounts_id_user_uq (id, user_id)`, `categories_id_user_uq` |
+
+`budgets` n'est la cible d'aucune FK → pas de `UNIQUE (id, user_id)`.
+
+**Les index (comme l'index d'un livre / un dictionnaire)**
+- Sans index, `WHERE account_id = ...` lit toute la table (*full scan*). Avec, Postgres va directement aux bonnes lignes.
+- Prix : de la place, et une mise à jour à chaque écriture → seulement là où on **cherche** souvent.
+- Postgres n'indexe pas les FK. Mais `PRIMARY KEY` et `UNIQUE` créent un index, qui couvre **sa première colonne**.
+- Couvertes : `accounts.user_id`, `categories.user_id` (par `(user_id, name)`), `budgets.user_id` (par `(user_id, category_id, month)`).
+- Créés : `transactions (user_id, date)` (couvre la FK **et** la requête « mes transactions par date »), `transactions (account_id)`, `transactions (category_id)`, `budgets (category_id)`.
+- Syntaxe : `CREATE INDEX transactions_account_idx ON transactions (account_id);` après les `CREATE TABLE`.
+
+**Appliquer la migration**
+- `./mvnw spring-boot:run` → log Flyway `Successfully applied 1 migration ... now at version v1`.
+- Le terminal reste occupé par l'appli : nouvel onglet (`Cmd + T`) ou `Ctrl + C` (les tables restent en base).
+- En Postgres, une migration Flyway est **transactionnelle** : une erreur annule tout le fichier, on corrige et on relance.
+- « Ne jamais modifier une migration appliquée » vaut dès qu'elle est **partagée** (autre machine, CI, prod).
+  Tant qu'elle n'existe que sur ma base locale : je la modifie, `docker compose down -v`, `up -d`, je relance.
+
+**psql (dans le conteneur)** : `docker compose exec db psql -U budget -d budget`
+
+| Commande | Effet |
+| --- | --- |
+| `\dt` | liste les tables |
+| `\d transactions` | colonnes, contraintes, index d'une table |
+| `SELECT * FROM users;` | contenu (ne pas oublier le `;`) |
+| `q` | sortir de l'afficheur `(END)` |
+| `\q` | quitter psql |
+
+- Invite `budget-#` = il manque le `;`.
+- Test : `INSERT` avec `'Ilyas@Test.fr'` → `violates check constraint "users_email_lower_chk"`.
+  Le message affiche **le nom que j'ai choisi** ; une contrainte non nommée reçoit un nom généré (`budgets_user_id_fkey`), moins parlant.
+
+### Écrire la migration `V1__init.sql` (séance 4)
+
+**Pourquoi un fichier SQL plutôt que pgAdmin** : une table créée par clics n'existe que dans ma base locale.
+Le fichier est versionné avec le code et Flyway l'applique partout (mon Mac, Testcontainers, CI, AWS) : le schéma devient du code.
+pgAdmin reste utile pour **regarder** les tables une fois la migration appliquée (`localhost:5432`).
+
+| Dans pgAdmin | En SQL |
+| --- | --- |
+| Create → Table | `CREATE TABLE nom (...);` |
+| une ligne de l'onglet Columns | `nom_colonne TYPE,` |
+| case « Not NULL? » | `NOT NULL` (sans = colonne optionnelle) |
+| champ « Default » | `DEFAULT valeur` |
+| case « Primary key? » | `PRIMARY KEY` |
+| Constraints → Unique / Check | `CONSTRAINT nom UNIQUE (col)` / `CONSTRAINT nom CHECK (condition)` |
+| Constraints → Foreign Key | `REFERENCES autre_table (col) ON DELETE ...` sur la ligne de la colonne |
+
+**Pièges de syntaxe rencontrés**
+- Une virgule entre chaque ligne, **pas** après la dernière ; un `;` à la fin de chaque `CREATE TABLE`.
+- `TIMESTAMPTZ` (pas `TIMESTAMPZ`).
+- Un `CHECK` contient une **condition** vrai/faux : `CHECK (lower(email) = email)`, pas `CHECK (email)`. Pour une liste : `CHECK (type IN ('A', 'B'))`.
+- Convention : mots-clés SQL en MAJUSCULES, noms en minuscules (Postgres met de toute façon les noms en minuscules).
+- Nommer les contraintes `table_colonne_type` : `users_email_uq`, `accounts_type_chk`.
+- Une FK s'appelle `<entité au singulier>_id` : `user_id`, pas `users_id`. Un même nom partout (`email` en base = en Java = en JSON).
+
+**Ordre des tables** : une table ne peut pointer que vers des tables déjà créées
+(sinon `relation "accounts" does not exist` et Flyway annule tout) → `users` → `accounts`, `categories` → `transactions`, `budgets`.
+
+**UUID** : `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` (intégré depuis Postgres 13, UUID v4).
+
+**Texte** : en Postgres, `TEXT` et `VARCHAR(n)` sont stockés pareil (mêmes perfs), `(n)` ajoute juste une limite.
+Choix du projet : `TEXT` partout, longueur validée en Java (`@Size`). Un email peut faire 254 caractères (64 = seulement la partie avant le `@`).
+
+**Argent** : `INT` arrondit **en silence** (1 234,56 → 1 235). Toujours `NUMERIC(12,2)`.
+`initial_balance` sans `CHECK (> 0)` : un compte peut démarrer à découvert.
+
+**Ordre des colonnes d'un index composite (l'annuaire)** : un annuaire trié par (nom, prénom) trouve vite tous les « Dupont », jamais toutes les « Marie ».
+`UNIQUE (user_id, name)` range les lignes d'un même user ensemble → sert aussi à `WHERE user_id = ?`. `(name, user_id)` ne servirait à rien pour ça.
+
+**`UNIQUE (id, user_id)` : redondant pour la logique, nécessaire pour la technique**
+- `id` est unique, donc le couple l'est forcément : aucune règle métier en plus.
+- Mais Postgres exige qu'une FK pointe vers des colonnes avec **exactement** un `UNIQUE` / `PRIMARY KEY` déclaré
+  (sinon `there is no unique constraint matching given keys`) : il lui faut un index sur ce couple pour vérifier vite.
+- À mettre sur chaque table **cible** d'une FK composite : `accounts` et `categories`.
+- Exemple : accounts = (A1, ilyas), (B1, sœur). Transaction (user sœur, compte A1) → couple (A1, sœur) absent → refusée.
+
+**Les `ON DELETE` restants**
+- `transactions.account_id` : refus (on ne supprime pas un compte qui a des transactions). Dans le doute, **l'option qu'on peut assouplir plus tard** :
+  passer en `CASCADE` = migration de 2 lignes ; des données effacées = perdues pour toujours.
+  `CASCADE` + confirmation forte côté front se défend aussi → noté dans `idees.md` pour novembre.
+- Tous les `user_id` : `CASCADE`. RGPD, droit à l'effacement : les données appartiennent au user, s'il demande la suppression on efface tout (les garder serait illégal).
+- ⚠️ **`NO ACTION` plutôt que `RESTRICT`** : supprimer un user fait cascader comptes + transactions dans la même opération.
+  `RESTRICT` vérifie immédiatement et peut bloquer selon l'ordre de la cascade ; `NO ACTION` (le défaut, on n'écrit rien) vérifie à la **fin** de l'opération → passe.
+
+| FK | `ON DELETE` |
+| --- | --- |
+| tous les `user_id` | `CASCADE` |
+| `transactions.account_id` | rien (défaut `NO ACTION` = refus) |
+| `transactions.category_id` | `SET NULL (category_id)` |
+| `budgets.category_id` | `CASCADE` |
+
+**Flyway : ne pas lancer l'appli tant que `V1__init.sql` n'est pas fini.** Une fois appliqué, le fichier est figé (checksum).
+Si ça arrive en dev : `docker compose down -v` (efface la base) puis relancer.
+
+### Décisions finales du schéma (séance 3)
+
+Le schéma de la séance 2 (plus bas) reste la base ; voici les choix tranchés et leur justification.
+
+**`users`**
+- `display_name` seul, pas de nom + prénom : l'appli en a besoin uniquement pour afficher « Salut Ilyas ».
+  **Minimisation RGPD** : une donnée qu'on ne stocke pas ne peut pas fuiter.
+- Ids en **UUID** (v4, généré par Postgres avec `gen_random_uuid()`) : 122 bits aléatoires, générables n'importe où sans demander à la base.
+  - Avantages : impossible à deviner / énumérer (`/accounts/42` → `/accounts/43`), ne révèle pas le nombre d'utilisateurs.
+  - ⚠️ **Le UUID ne protège PAS de l'IDOR.** La vraie protection reste `findByIdAndUserId(id, moi)`. Le UUID est une couche en plus (**défense en profondeur**).
+  - Coût : 16 octets au lieu de 8, illisible, index rempli dans le désordre (le UUID v7, trié par date, corrige ça ; Postgres 17 ne fait que du v4).
+- `created_at` en **`TIMESTAMPTZ`** : stocke un **instant** (converti en UTC), même sens sur mon Mac à Paris et sur un serveur AWS en UTC.
+  `TIMESTAMP` = une heure sans fuseau, ambiguë. Malgré le nom, `TIMESTAMPTZ` ne garde pas le fuseau d'origine. En Java : `Instant`.
+- **Email** : pour Postgres, `Ilyas@gmail.com` ≠ `ilyas@gmail.com`, donc `UNIQUE` seul laisse passer les deux (= deux comptes pour la même personne).
+  - Java normalise : `email.trim().toLowerCase()` à l'inscription **et** au login.
+  - La base garantit : `CHECK (email = lower(email))` (+ `UNIQUE(email)` normal).
+  - Alternative : index unique sur `lower(email)`, utile quand on ne maîtrise pas les données qui arrivent en base.
+  - Phrase d'entretien : « Je normalise côté appli, et la base garantit la règle avec un CHECK. »
+
+**`accounts`**
+- **Pas de colonne solde** : « Le solde se déduit des transactions. Le stocker créerait une deuxième **source de vérité** qui peut se contredire au moindre oubli dans le code (créer, modifier, changer de compte, supprimer…). Donc on le calcule. »
+  Prix : un `SUM` à l'affichage (quelques ms avec un index). Stocker un calcul pour la perf = **dénormalisation**, à faire seulement comme choix conscient.
+  (Ne pas confondre avec l'**atomicité** « crédité d'un côté, pas débité de l'autre » : ça, c'est `@Transactional`.)
+- `UNIQUE (user_id, name)` = **contrainte d'unicité composite** : l'unicité porte sur la combinaison.
+  Moi et ma sœur pouvons chacun avoir un « Compte courant », mais pas moi deux fois.
+  Postgres crée un index `(user_id, name)` ; un index composite sert aussi pour sa **1re** colonne seule (`WHERE user_id = ?`), pas pour la 2e seule.
+- `type` gardé : **texte libre pour l'humain** (`name` : « Cagnotte »), **valeur contrôlée pour le code** (`type` : `GROUP BY`, icônes, règles futures comme plafond / intérêts). Même logique pour `kind`.
+- `currency CHAR(3)` : code **ISO 4217** (`EUR`, `USD`, `MAD`), toujours 3 lettres.
+
+**Restreindre une colonne à une liste de valeurs (`type`, `kind`)**
+
+| Option | Pour | Contre |
+| --- | --- | --- |
+| `CHECK (type IN (...))` ✅ choisi | simple, Hibernate sans config | changer la liste = supprimer + recréer la contrainte |
+| `ENUM` Postgres (`CREATE TYPE ... AS ENUM`) | ajouter une valeur facile | retirer / renommer pénible, config Hibernate en plus |
+| Table de référence + FK | valeurs avec données (libellé, couleur), ajout sans migration | jointure en plus ; c'est le cas des **catégories** |
+
+- Côté Java : `enum` + `@Enumerated(EnumType.STRING)`. **Jamais `ORDINAL`** (stocke 0, 1, 2 : insérer une valeur dans l'enum change le sens des données).
+- **Nommer ses contraintes** : `CONSTRAINT accounts_type_chk CHECK (...)`, pour pouvoir les supprimer plus tard.
+- **Flyway : on ne modifie JAMAIS une migration déjà appliquée** (checksum dans `flyway_schema_history`, l'appli refuse de démarrer).
+  Ajouter `CARTE_CREDIT` = nouvelle migration `V2__...sql` qui supprime et recrée la contrainte.
+
+**`categories`**
+- **Copiées par utilisateur** à l'inscription plutôt que partagées (`user_id = NULL`) : pas de cas particulier dans le filtre anti-IDOR
+  (sinon `user_id = moi OU user_id IS NULL`, + règle « lecture seule »), et chacun peut renommer / recolorer. Coût : ~10 lignes par user.
+- `kind` sur la catégorie : à quel type de transaction elle sert → la liste « nouvelle dépense » ne propose pas « Salaire », pas de budget sur un revenu.
+
+**`transactions`**
+- **Montant toujours > 0 + `kind`** plutôt que montant signé. Les deux sont défendables :
+  signé = solde plus simple (`initial + SUM(amount)`), colle aux relevés CSV, gère bien les remboursements ;
+  `kind` = sens écrit en toutes lettres (enum Java), pas de convention « négatif = sortie » à connaître. **Choix : `kind`.**
+- `kind` **sur la transaction ET sur la catégorie** : obligatoire sur la transaction car `category_id` est **optionnel** (sinon une transaction sans catégorie n'a pas de sens).
+  Duplication voulue ; incohérence possible acceptée (ex. remboursement Zara = REVENU rangé dans « Vêtements » qui est DEPENSE).
+- **`date` ≠ `created_at`** : courses samedi 31/10 saisies lundi 02/11 → `date` = 31/10 (compte dans le budget d'octobre), `created_at` = l'instant de saisie (technique).
+- **Un jour → `DATE`, un instant → `TIMESTAMPTZ`.** Un 1er novembre stocké en `TIMESTAMPTZ` = 01/11 00h Paris = 31/10 23h UTC → rangé en octobre côté serveur.
+- Index `(user_id, date)` : la requête la plus fréquente = mes transactions par date / par mois.
+
+**Anti-IDOR en écriture : FK composites**
+- Problème : `account_id REFERENCES accounts(id)` vérifie que le compte **existe**, pas **à qui il est**.
+  Ma sœur (B) peut faire `POST /transactions` avec l'id de mon compte → ligne `(user B, compte A, 500 €)` acceptée → mon solde faussé ou transaction « fantôme ».
+- **Java (obligatoire)** : vérifier `findByIdAndUserId(accountId, moi)` (et `categoryId`) à la création **et à la modification** (PUT qui change de compte) → 404.
+- **Base (le filet)** :
+  ```sql
+  -- dans accounts et categories
+  UNIQUE (id, user_id)
+  -- dans transactions
+  FOREIGN KEY (account_id, user_id)  REFERENCES accounts (id, user_id)
+  FOREIGN KEY (category_id, user_id) REFERENCES categories (id, user_id)
+  -- dans budgets
+  FOREIGN KEY (category_id, user_id) REFERENCES categories (id, user_id)
+  ```
+  Si une colonne de la FK est `NULL` (transaction sans catégorie), Postgres ne vérifie pas → l'optionnel marche.
+- Pourquoi les deux : chaque chemin d'écriture (POST, PUT, import CSV en V2, données de démo, script SQL) doit penser au contrôle Java ; la contrainte s'écrit **une fois** et protège tout, même le code pas encore écrit.
+- Phrase d'entretien : « Le filtre par utilisateur est fait dans le service, et la base le garantit avec des clés étrangères composites. »
+
+**`budgets`**
+- Lié à une catégorie + un mois, **pas à un compte** : 300 € de courses, payées en carte ou en espèces.
+- `CONSTRAINT budgets_month_first_day_chk CHECK (EXTRACT(DAY FROM month) = 1)` : sinon `2026-10-01` et `2026-10-15` contournent le `UNIQUE (user_id, category_id, month)` → deux budgets « Courses » en octobre.
+- Limite : un `CHECK` ne voit que **sa propre ligne**, il ne peut pas vérifier dans `categories` que la catégorie est une DEPENSE → règle portée par le Java.
+
+**`ON DELETE` : que faire des lignes qui pointent vers une ligne supprimée ?**
+
+| Option | Ce que fait la base |
+| --- | --- |
+| `RESTRICT` / `NO ACTION` (défaut) | refuse la suppression (erreur) |
+| `CASCADE` | supprime aussi les lignes qui pointent dessus |
+| `SET NULL` | garde les lignes, vide leur FK |
+
+- Suppression d'une catégorie → `transactions.category_id` : **`SET NULL`**. Les transactions = l'historique et le solde, on n'y touche pas ; elles deviennent « non catégorisées ».
+  ⚠️ Avec la FK composite `(category_id, user_id)`, un `SET NULL` simple viderait aussi `user_id` (NOT NULL → erreur). Écrire **`ON DELETE SET NULL (category_id)`** (Postgres 15+).
+- Suppression d'une catégorie → `budgets.category_id` : **`CASCADE`**. Un budget est un objectif lié à la catégorie, sans elle il ne veut plus rien dire.
+- Règle : **historique (de l'argent qui a vraiment bougé) → on garde ; objectif rattaché → on supprime avec.**
+- À trancher : suppression d'un **compte** (ses transactions ?) et d'un **user** (RGPD, droit à l'effacement).
+
+**Postgres n'indexe PAS les clés étrangères**
+- `PRIMARY KEY` et `UNIQUE` créent un index automatiquement, une FK non.
+- Sans index, `WHERE account_id = ...` et le `SET NULL` / `CASCADE` lisent toute la table.
+- Réflexe : pour chaque FK, se demander si elle est déjà couverte par un index existant (un index composite sert pour sa 1re colonne), sinon en créer un.
+
+**Reste à trancher en écrivant `V1__init.sql`** : ordre de création des tables, `ON DELETE` du compte et du user, index sur les FK.
+
+
+### Les 5 tables de la V1 (séance 2, version de travail)
+
+```
+users
+- id : UUID, clé primaire
+- email : texte, obligatoire, UNIQUE
+- password_hash : texte, obligatoire      (jamais le mot de passe en clair, seulement l'empreinte BCrypt)
+- display_name : texte, obligatoire        (ou nom + prénom : choix à trancher, cf. minimisation RGPD)
+- created_at : TIMESTAMPTZ, défaut now()
+
+accounts
+- id : UUID
+- user_id → users, obligatoire
+- name : texte, obligatoire               (« Compte courant », « Livret A »)
+- type : COURANT / EPARGNE / ESPECES      (CHECK)
+- currency : CHAR(3), défaut 'EUR'
+- initial_balance : NUMERIC(12,2), défaut 0
+- created_at : TIMESTAMPTZ
+- UNIQUE (user_id, name)
+
+categories
+- id : UUID
+- user_id → users, obligatoire
+- name : texte, obligatoire               (« Courses », « Loyer », « Salaire »)
+- kind : DEPENSE / REVENU                  (CHECK)
+- color : texte, optionnel
+- UNIQUE (user_id, name)
+
+transactions
+- id : UUID
+- user_id → users, obligatoire
+- account_id → accounts, obligatoire
+- category_id → categories, OPTIONNEL     (« non catégorisée » → futur job de l'IA)
+- kind : DEPENSE / REVENU
+- amount : NUMERIC(12,2), CHECK (amount > 0)
+- date : DATE                              (jour de l'opération)
+- label : texte, obligatoire
+- note : texte, optionnel
+- created_at : TIMESTAMPTZ                 (moment de la saisie)
+
+budgets
+- id : UUID
+- user_id → users, obligatoire
+- category_id → categories, obligatoire
+- month : DATE (toujours le 1er du mois)
+- amount_limit : NUMERIC(12,2), CHECK (> 0)
+- UNIQUE (user_id, category_id, month)     (un seul budget par catégorie et par mois)
+```
+
+**Les liens**
+```
+users 1 ──< N accounts
+users 1 ──< N categories
+users 1 ──< N transactions
+users 1 ──< N budgets
+accounts   1 ──< N transactions
+categories 1 ──< N transactions   (côté transaction : optionnel)
+categories 1 ──< N budgets
+```
+
+### Règle 1 : jamais de `float` / `double` pour de l'argent
+- Les flottants sont **approximatifs** : en Java, `0.1 + 0.2 = 0.30000000000000004`. Sur des milliers d'opérations, des centimes se perdent.
+- En base : `NUMERIC(12,2)` (nombre exact, 2 décimales, jusqu'à 9 999 999 999,99).
+- En Java : `BigDecimal` (et comparer avec `compareTo`, pas `equals` : `2.0` et `2.00` ne sont pas `equals`).
+- Question d'entretien très classique.
+
+### Règle 2 : une information à un seul endroit
+- Si une info est stockée deux fois, un jour les deux versions se contredisent.
+- **Le solde d'un compte n'est pas stocké** : solde = `initial_balance` + revenus − dépenses, calculé depuis les transactions.
+  Stocker le solde obligerait à le mettre à jour à chaque transaction ; une mise à jour ratée = solde faux pour toujours.
+- **La devise est sur le compte, pas sur la transaction** : une transaction hérite de la devise de son compte.
+- Exception assumée : `user_id` est répété sur toutes les tables (on pourrait le retrouver via le compte).
+  C'est volontaire : chaque requête filtre simplement `WHERE user_id = <moi>` → sécurité plus simple (anti-IDOR).
+  Une redondance doit toujours être un **choix conscient et justifié**, jamais un accident.
+
+### Règle 3 : la clé étrangère est toujours du côté « plusieurs »
+- Un compte a plusieurs transactions → c'est `transactions` qui a une colonne `account_id`.
+- `accounts` n'a **pas** de colonne « transactions » : une colonne SQL contient une seule valeur, pas une liste.
+- Pour avoir les transactions d'un compte : `SELECT * FROM transactions WHERE account_id = ...`.
+
+### Les types de relations
+| Relation | Exemple | Comment en SQL |
+| --- | --- | --- |
+| **Un à plusieurs** (1-N) | un compte → plusieurs transactions | clé étrangère côté « plusieurs » (`transactions.account_id`) |
+| **Un à un** (1-1) | un user → un seul profil détaillé | clé étrangère + `UNIQUE` dessus (rare) |
+| **Plusieurs à plusieurs** (N-N) | transactions ↔ tags (une transaction a 0..n tags, un tag est sur n transactions) | une **table de liaison** `transaction_tags(transaction_id, tag_id)` |
+
+**Comment trouver le bon type** : se poser la question **dans les deux sens**.
+- « Une transaction a combien de catégories ? » → 1 (ou 0). « Une catégorie a combien de transactions ? » → plein. ⇒ **plusieurs à un**.
+- Si la réponse est « plein » dans les deux sens → plusieurs à plusieurs → table de liaison.
+- Si c'est « 1 » dans les deux sens → un à un (vérifier que ce n'est pas juste la même table).
+
+**Piège (ma réflexion de la séance 2)** : une transaction avec un débiteur et un créditeur, ce n'est **pas** du plusieurs à plusieurs.
+C'est **deux** clés étrangères vers la même table (`from_account_id`, `to_account_id`), chacune « plusieurs à un ».
+Le nombre de comptes par transaction est fixe (2), pas variable → pas de table de liaison.
+(C'est l'idée de la comptabilité en partie double : chaque mouvement a un débit et un crédit.)
+
+### Choix de conception à savoir défendre
+- **Montant toujours positif + `kind` (DEPENSE / REVENU)** plutôt qu'un montant signé : plus lisible, et la base l'impose (`CHECK (amount > 0)`).
+- **`date` ≠ `created_at`** : la date de l'opération (samedi) n'est pas la date de saisie (lundi).
+- **Catégorie optionnelle sur une transaction** : permet les transactions « non catégorisées » (import CSV, puis catégorisation par l'IA).
+- **Budget lié à une catégorie + un mois, pas à un compte** : « 300 € de courses en octobre », quel que soit le compte qui paie.
+  `month` = toujours le 1er du mois, et `UNIQUE (user_id, category_id, month)` empêche deux budgets pour la même chose.
+- **Catégories copiées par utilisateur** (à l'inscription) plutôt que partagées : pas de cas particulier « catégorie système ».
+- **Virements internes (courant → livret) : pas en V1.** Deux options plus tard :
+  ajouter un `to_account_id` optionnel, ou créer deux transactions liées (une dépense + un revenu).
+- **`password_hash`** et pas `password` : le nom protège contre l'erreur de stocker un mot de passe en clair.
+- **Minimisation des données (RGPD)** : ne stocker que ce dont l'appli a besoin (un `display_name` plutôt que nom + prénom ?).
+
+### Les contraintes SQL utilisées
+- `PRIMARY KEY` : identifiant unique de la ligne.
+- `NOT NULL` : colonne obligatoire, garantie **par la base**, pas seulement par le Java.
+- `UNIQUE` / `UNIQUE (a, b)` : pas de doublon (sur une colonne ou une combinaison).
+- `REFERENCES autre_table(id)` : clé étrangère, impossible de pointer vers une ligne qui n'existe pas.
+- `CHECK (condition)` : règle métier imposée par la base (`amount > 0`, `type IN ('COURANT', ...)`).
+- `DEFAULT valeur` : valeur si on n'en donne pas (`now()`, `'EUR'`, `0`).
+- Principe : **mettre les règles dans la base**. Le code peut avoir un bug, la base refusera quand même une donnée invalide.
+
+---
+
 ## Java
+
+### Relations JPA (séance 3)
+
+**L'idée** : en SQL, une relation = une seule colonne FK du côté « plusieurs ». En Java on manipule des objets
+(`transaction.getAccount().getName()`), JPA fait le pont :
+```java
+// dans Transaction
+@ManyToOne
+@JoinColumn(name = "account_id")   // la colonne FK en base
+private Account account;           // un objet, pas un UUID
+```
+
+**Lire le nom de l'annotation** : le 1er mot = la classe où je suis, le 2e = le champ.
+`@ManyToOne` dans `Transaction` = « **plusieurs** transactions → **un** compte ».
+
+| Champ | Annotation |
+| --- | --- |
+| `Transaction.account` | `@ManyToOne` |
+| `Transaction.category` | `@ManyToOne` (pas `@OneToOne` !) |
+| `Budget.category` | `@ManyToOne` |
+| `Account.user` | `@ManyToOne` |
+| `Account.transactions` (liste) | `@OneToMany(mappedBy = "account")` |
+
+**Mon erreur** : `Transaction.category` en `@OneToOne`, parce que j'ai regardé dans un seul sens (« une transaction a une catégorie »).
+Toujours poser la question **dans les deux sens** : une catégorie a combien de transactions ? Plein → `@ManyToOne`.
+Un vrai `@OneToOne` = chaque catégorie ne servirait qu'à une seule transaction (rare : un user et sa photo de profil).
+
+**Côté propriétaire / côté inverse**
+- Une seule colonne en base, mais on peut avoir un champ des deux côtés en Java (relation **bidirectionnelle**).
+- Le `@ManyToOne` (avec `@JoinColumn`) est le **propriétaire** : c'est lui qui écrit la FK.
+- Le `@OneToMany(mappedBy = "account")` est le côté **inverse** : « c'est le champ `account` de l'autre classe qui gère », lecture seule.
+- Un seul côté déclaré = relation **unidirectionnelle**.
+
+**Pourquoi pas de `@OneToMany` dans le projet**
+- `account.getTransactions()` ressemble à un simple getter, mais JPA lance en cachette
+  `SELECT * FROM transactions WHERE account_id = ...` → 5 000 objets chargés pour rien, et rien dans le code ne le montre.
+- Avec le repository, la requête est visible et limitée :
+  `transactionRepository.findByAccountIdAndUserId(accountId, userId, PageRequest.of(0, 20))`.
+- Phrase d'entretien : « J'évite le `@OneToMany` parce qu'un simple getter peut charger toute une collection sans que ça se voie dans le code.
+  Quand j'ai besoin du côté "plusieurs", je passe par le repository, avec une pagination. »
+- Nuance : acceptable quand le « plusieurs » est **petit** et **toujours** utile avec le parent (une commande et ses 3 lignes).
+- **Choix du projet : relations unidirectionnelles, seulement des `@ManyToOne`.**
+
+**À voir en séance 4, avec les requêtes SQL affichées dans la console** : `LAZY` / `EAGER`
+(⚠️ `@ManyToOne` est `EAGER` par défaut → écrire `@ManyToOne(fetch = FetchType.LAZY)`), le problème N+1, `LazyInitializationException`.
+
+---
 
 ### Lombok et les records (séance 2)
 
