@@ -20,3 +20,8 @@
 - Fait : ON DELETE restants tranchés (user → CASCADE pour le RGPD, compte → NO ACTION) ; `V1__init.sql` commencé : `users`, `accounts`, `categories` écrites à la main et relues ; `.gitignore` protège le PDF du plan (repo public)
 - Bloqué / appris : écrire du SQL sans pgAdmin (CREATE TABLE, CONSTRAINT, REFERENCES) ; gen_random_uuid() ; TEXT vs VARCHAR ; INT arrondit l'argent en silence → NUMERIC(12,2) ; ordre des colonnes d'un index composite (l'annuaire) ; UNIQUE (id, user_id) = exigence technique des FK composites ; NO ACTION vs RESTRICT
 - Prochaine séance (sam. 10h30) : écrire `transactions` (2 FK composites, SET NULL (category_id), index (user_id, date)) puis `budgets`, index sur les FK, appliquer la migration et vérifier dans pgAdmin. Ne PAS lancer l'appli avant.
+
+## 2026-10-10 · Séance 5
+- Fait : `V1__init.sql` terminé et appliqué par Flyway (5 tables + `flyway_schema_history`) : `transactions` (2 FK composites, SET NULL (category_id)), `budgets` (CHECK 1er du mois, CASCADE), 4 index sur les FK ; vérifié dans psql (`\dt`, `\d budgets`) et testé la contrainte email en majuscules → refusée
+- Bloqué / appris : FK simple (propriétaire, valeur du backend) vs composite (ressource envoyée par le client) ; paires de colonnes dans une FK composite ; pas de DEFAULT sans valeur naturelle ; UNIQUE métier (jamais d'id) vs technique ; ce qu'est un index et quand une FK est déjà couverte ; migration transactionnelle ; psql
+- Prochaine séance (mar. 19h) : entités JPA + repositories + 1er test Testcontainers (ancienne séance 4 du plan), avec `spring.jpa.show-sql` pour voir les requêtes (LAZY / EAGER)

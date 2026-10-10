@@ -29,6 +29,67 @@ Une section par sujet, la plus récente en haut de chaque section.
 
 ## Modélisation de la base de données
 
+### Finir et appliquer `V1__init.sql` (séance 5)
+
+**FK simple ou composite : d'où vient la valeur ?**
+
+| Colonne | Qui fournit la valeur ? | Pointe vers quelque chose qui a un propriétaire ? | FK |
+| --- | --- | --- | --- |
+| `user_id` | le backend (token de l'utilisateur connecté) | non, c'est le propriétaire | simple, sur la ligne : `REFERENCES users (id) ON DELETE CASCADE` |
+| `account_id` | le client (JSON de la requête) | oui | composite, en bas de la table |
+| `category_id` | le client (JSON de la requête) | oui | composite, en bas de la table |
+
+- Règle : **FK vers une ressource qui a son propre propriétaire → composite. FK vers le propriétaire lui-même → simple.**
+- Le `REFERENCES` sur la ligne d'une colonne ne porte que sur cette colonne. Pour un couple :
+  ```sql
+  CONSTRAINT transactions_account_fk FOREIGN KEY (account_id, user_id) REFERENCES accounts (id, user_id)
+  ```
+  Les parenthèses vont **par paires, dans l'ordre** : `account_id` ↔ `id`, `user_id` ↔ `user_id` (dans la même ligne de `accounts`).
+- `ON DELETE SET NULL` tout court sur une FK composite vide **toutes** ses colonnes (dont `user_id`, NOT NULL → erreur) → `ON DELETE SET NULL (category_id)`.
+
+**Pas de `DEFAULT` sans valeur « naturelle »**
+- `amount DEFAULT 0` + `CHECK (amount > 0)` : le défaut serait toujours refusé, il ne sert à rien et trompe le lecteur.
+- Sans `DEFAULT`, un `INSERT` sans montant échoue clairement (`violates not-null constraint`) : le montant doit toujours être fourni.
+- `created_at` (maintenant) et `currency` (EUR) ont une valeur naturelle → `DEFAULT` justifié.
+
+**Deux sortes de `UNIQUE`**
+
+| Sorte | Rôle | Contient `id` ? | Exemples |
+| --- | --- | --- | --- |
+| règle métier | empêcher un doublon | **jamais** (sinon elle ne bloque rien, `id` est déjà unique) | `users_email_uq`, `accounts_name_uq (user_id, name)`, `budgets_user_category_month_uq` |
+| technique | cible d'une FK composite | oui | `accounts_id_user_uq (id, user_id)`, `categories_id_user_uq` |
+
+`budgets` n'est la cible d'aucune FK → pas de `UNIQUE (id, user_id)`.
+
+**Les index (comme l'index d'un livre / un dictionnaire)**
+- Sans index, `WHERE account_id = ...` lit toute la table (*full scan*). Avec, Postgres va directement aux bonnes lignes.
+- Prix : de la place, et une mise à jour à chaque écriture → seulement là où on **cherche** souvent.
+- Postgres n'indexe pas les FK. Mais `PRIMARY KEY` et `UNIQUE` créent un index, qui couvre **sa première colonne**.
+- Couvertes : `accounts.user_id`, `categories.user_id` (par `(user_id, name)`), `budgets.user_id` (par `(user_id, category_id, month)`).
+- Créés : `transactions (user_id, date)` (couvre la FK **et** la requête « mes transactions par date »), `transactions (account_id)`, `transactions (category_id)`, `budgets (category_id)`.
+- Syntaxe : `CREATE INDEX transactions_account_idx ON transactions (account_id);` après les `CREATE TABLE`.
+
+**Appliquer la migration**
+- `./mvnw spring-boot:run` → log Flyway `Successfully applied 1 migration ... now at version v1`.
+- Le terminal reste occupé par l'appli : nouvel onglet (`Cmd + T`) ou `Ctrl + C` (les tables restent en base).
+- En Postgres, une migration Flyway est **transactionnelle** : une erreur annule tout le fichier, on corrige et on relance.
+- « Ne jamais modifier une migration appliquée » vaut dès qu'elle est **partagée** (autre machine, CI, prod).
+  Tant qu'elle n'existe que sur ma base locale : je la modifie, `docker compose down -v`, `up -d`, je relance.
+
+**psql (dans le conteneur)** : `docker compose exec db psql -U budget -d budget`
+
+| Commande | Effet |
+| --- | --- |
+| `\dt` | liste les tables |
+| `\d transactions` | colonnes, contraintes, index d'une table |
+| `SELECT * FROM users;` | contenu (ne pas oublier le `;`) |
+| `q` | sortir de l'afficheur `(END)` |
+| `\q` | quitter psql |
+
+- Invite `budget-#` = il manque le `;`.
+- Test : `INSERT` avec `'Ilyas@Test.fr'` → `violates check constraint "users_email_lower_chk"`.
+  Le message affiche **le nom que j'ai choisi** ; une contrainte non nommée reçoit un nom généré (`budgets_user_id_fkey`), moins parlant.
+
 ### Écrire la migration `V1__init.sql` (séance 4)
 
 **Pourquoi un fichier SQL plutôt que pgAdmin** : une table créée par clics n'existe que dans ma base locale.
