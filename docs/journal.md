@@ -26,3 +26,8 @@
 - Bloqué / appris : FK simple (propriétaire, valeur du backend) vs composite (ressource envoyée par le client) ; paires de colonnes dans une FK composite ; pas de DEFAULT sans valeur naturelle ; UNIQUE métier (jamais d'id) vs technique ; ce qu'est un index et quand une FK est déjà couverte ; migration transactionnelle ; psql
 - Prochaine séance (mar. 19h) : entités JPA + repositories + 1er test Testcontainers (ancienne séance 4 du plan), avec `spring.jpa.show-sql` pour voir les requêtes (LAZY / EAGER)
 - Bilan semaine (10/10) : ~2 séances de retard (entités + auth 1/2) ; séances « prof » ≈ 1,5 à 2× le temps prévu. Jalons = repères de suivi, pas des deadlines → V1 décalée d'une semaine : backend 31/10, front 14/11, `docker compose up` 5/12, CI mi → fin déc., certif fin juin 2027 inchangée. Règle : chaque samedi on regarde l'écart ; s'il dépasse 2 séances, on décale encore d'une semaine.
+
+## 2026-10-13 · Séance 6 (1h)
+- Fait : 3 questions de révision (2,5/3) ; entité `User` (UUID généré en Java, constructeur protected, email normalisé dans le constructeur) validée contre la table au démarrage (`ddl-auto=validate`) ; `UserRepository` (`findByEmail` → Optional, `existsByEmail`)
+- Bloqué / appris : `@Table` obligatoire (`user` réservé en Postgres) ; `java.util.UUID` ; piège `createdAt` (Hibernate insère les null) ; pourquoi un constructeur vide protected (réflexion + proxies) ; `nullable=false` inutile avec Flyway ; Spring Data déduit la requête du nom de méthode ; Optional plutôt que null
+- Prochaine séance (mer. 19h) : 3 questions, puis entités `Account` (`@ManyToOne(fetch = LAZY)`, enum `@Enumerated(STRING)`, `BigDecimal`, sûrement une erreur sur `CHAR(3)` à lire) et `Category` + leurs repositories, puis 1er test Testcontainers

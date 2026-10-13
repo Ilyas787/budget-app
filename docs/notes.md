@@ -354,6 +354,56 @@ private Account account;             // un objet, pas un UUID
   Nuance : acceptable quand le « plusieurs » est petit et toujours utile avec le parent (une commande et ses 3 lignes).
 - **Choix du projet : relations unidirectionnelles, seulement des `@ManyToOne(fetch = LAZY)`.**
 
+### Entités et repositories (séance 6)
+
+**Une entité = une classe Java liée à une table** (un objet = une ligne, un champ = une colonne).
+Avec `spring.jpa.hibernate.ddl-auto=validate`, Hibernate vérifie au démarrage que chaque entité colle à la table créée par Flyway :
+si l'appli démarre (`Started BudgetApplication`), l'entité est bonne ; sinon l'erreur nomme la colonne fautive.
+
+```java
+@Entity
+@Table(name = "users")          // obligatoire : sinon Hibernate cherche "user", mot réservé en Postgres
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)   // UUID généré en Java avant l'INSERT
+    private UUID id;                                   // java.util.UUID ↔ uuid Postgres
+    private String passwordHash;                       // camelCase → password_hash automatiquement
+    private Instant createdAt = Instant.now();         // valeur donnée en Java (voir piège)
+
+    protected User() {}                                // pour JPA
+    public User(String email, String passwordHash, String displayName) {
+        this.email = email.trim().toLowerCase(Locale.ROOT);   // normalisation de l'email
+        ...
+    }
+    // getters seulement : pas de setter sur id ni createdAt
+}
+```
+
+- **Piège `createdAt`** : Hibernate envoie **toutes** les colonnes dans l'`INSERT`, même à `null` → le `DEFAULT now()` de la base ne s'applique jamais et le `NOT NULL` refuse. Donner la valeur en Java.
+- **`@Column(name = ...)` inutile** quand le nom suit la convention (Spring convertit le camelCase en snake_case).
+- **`@Column(nullable = false)` inutile ici** : il ne sert que si Hibernate crée les tables ; `validate` ne vérifie pas le `NOT NULL`.
+  La règle vit dans la base (garantie) et dans le DTO (`@NotBlank`, `@Email` → 400 clair).
+- **Normaliser l'email dans le constructeur** : impossible de créer un `User` avec des majuscules. `Locale.ROOT` évite le piège du turc (`"I".toLowerCase()` ≠ `"i"`).
+  Il faudra aussi normaliser l'email reçu au **login** avant `findByEmail`.
+
+**Le constructeur sans argument, en `protected`**
+- JPA crée l'objet **vide** puis remplit les champs par **réflexion** : il ne sait pas utiliser un constructeur à paramètres.
+- `protected` et pas `public` : mon code ne peut pas créer un `User` incomplet par erreur (`new User()` sans email).
+- Pas `private` : pour le `LAZY`, Hibernate crée des **proxies** = des sous-classes de l'entité, qui doivent appeler le constructeur parent.
+- Phrase d'entretien : « Le constructeur sans argument est obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. Je le mets en `protected` pour que mon code ne puisse pas créer d'entité incomplète, tout en laissant Hibernate et ses proxies l'utiliser. »
+
+**Le repository (Spring Data)** : une simple interface, Spring génère l'implémentation au démarrage.
+```java
+public interface UserRepository extends JpaRepository<User, UUID> {   // <entité, type de la clé primaire>
+    Optional<User> findByEmail(String email);   // Optional : "il peut ne rien y avoir", l'appelant est obligé de gérer le cas
+    boolean existsByEmail(String email);        // pour renvoyer 409 à l'inscription
+}
+```
+- `JpaRepository` donne gratuitement `save`, `findById`, `findAll`, `deleteById`, `count`…
+- Les requêtes sont déduites du **nom de la méthode** : mot-clé (`find…By`, `exists…By`, `count…By`) + **nom du champ Java**.
+  `findByEmail` plutôt que `findUserByEmail` (le mot entre `find` et `By` est ignoré).
+- Retourner `User` au lieu de `Optional<User>` marche (null si absent) mais cache le cas « absent » → `NullPointerException` un jour.
+
 ---
 
 ## 7. Java : records, Lombok, injection
