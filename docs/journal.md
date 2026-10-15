@@ -31,3 +31,8 @@
 - Fait : 3 questions de révision (2,5/3) ; entité `User` (UUID généré en Java, constructeur protected, email normalisé dans le constructeur) validée contre la table au démarrage (`ddl-auto=validate`) ; `UserRepository` (`findByEmail` → Optional, `existsByEmail`)
 - Bloqué / appris : `@Table` obligatoire (`user` réservé en Postgres) ; `java.util.UUID` ; piège `createdAt` (Hibernate insère les null) ; pourquoi un constructeur vide protected (réflexion + proxies) ; `nullable=false` inutile avec Flyway ; Spring Data déduit la requête du nom de méthode ; Optional plutôt que null
 - Prochaine séance (mer. 19h) : 3 questions, puis entités `Account` (`@ManyToOne(fetch = LAZY)`, enum `@Enumerated(STRING)`, `BigDecimal`, sûrement une erreur sur `CHAR(3)` à lire) et `Category` + leurs repositories, puis 1er test Testcontainers
+
+## 2026-10-15 · Séance 7 (jeudi, à la place de mercredi)
+- Fait : 3 questions (~1,5/3 : à revoir constructeur protected, piège createdAt, Optional) ; enum `AccountType` ; entité `Account` (`@ManyToOne(fetch = LAZY)` vers User, `@Enumerated(STRING)`, `BigDecimal`) ; erreur de validation sur `currency CHAR(3)` lue et comprise → 1re migration `V2__currency_en_text.sql` (TEXT + CHECK regex `^[A-Z]{3}$`) ; `AccountRepository` (`findByIdAndUserId`, liste des comptes)
+- Bloqué / appris : lire le dernier `Caused by:` ; String ↔ varchar vs CHAR(3) ; on ne modifie pas une migration partagée → V2 ; comment BigDecimal est exact (entier × 10^-scale) ; `class` vs `interface` pour un repository ; Optional (0/1) vs List (0..n) ; Spring traverse `UserId` → `user.id`
+- Prochaine séance (sam. 10h30) : 3 questions, `Category` + `CategoryRepository`, puis 1er test Testcontainers (un test de repository sur un vrai Postgres)

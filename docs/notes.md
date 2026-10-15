@@ -404,6 +404,54 @@ public interface UserRepository extends JpaRepository<User, UUID> {   // <entit�
   `findByEmail` plutôt que `findUserByEmail` (le mot entre `find` et `By` est ignoré).
 - Retourner `User` au lieu de `Optional<User>` marche (null si absent) mais cache le cas « absent » → `NullPointerException` un jour.
 
+
+**Relation `@ManyToOne` en pratique (séance 7, `Account`)**
+```java
+@ManyToOne(fetch = FetchType.LAZY)   // plusieurs comptes → un user ; LAZY sinon EAGER par défaut
+@JoinColumn(name = "user_id")        // la colonne FK en base (un uuid, rien ne change côté SQL)
+private User user;                   // côté Java : un objet, pas un id
+
+@Enumerated(EnumType.STRING)         // écrit le NOM de la valeur ("COURANT") → doit être identique au CHECK de la base
+private AccountType type;            // enum plutôt que String : le compilateur refuse "Courant"
+```
+- `UUID userId` à la place de la relation est défendable (simple), mais `userId`, `accountId`, `categoryId` sont tous des `UUID` → les inverser compile sans erreur. Avec `User user`, le compilateur protège. Choix du projet : `@ManyToOne`.
+- Pour créer un `Account` à partir de l'id du token : `userRepository.getReferenceById(userId)` donne un `User` (proxy) **sans requête SQL**.
+- Même piège que `createdAt` pour toutes les colonnes avec `DEFAULT` en base : `currency = "EUR"`, `initialBalance = BigDecimal.ZERO` en Java.
+- Le montant initial est dans le constructeur (pas de setter : sinon impossible de créer un Livret A à 1 234,56 €).
+
+**`BigDecimal` : comment c'est exact ?**
+- Pas de virgule stockée : deux **entiers**. `12,34 = 1234 × 10⁻²` (`unscaledValue` = `BigInteger` de taille illimitée, `scale` = position de la virgule). Base 10 → `0,1` exact.
+- Un `double` est en **base 2** : `0,1` y est infini (`0,000110011…`), comme `1/3` en base 10 → tronqué.
+- ⚠️ `new BigDecimal(0.1)` recopie l'erreur du `double` → toujours `new BigDecimal("0.10")` ou `BigDecimal.valueOf(...)`. Zéro : `BigDecimal.ZERO`.
+- Division : `1/3` → `ArithmeticException` sans règle d'arrondi (`divide(x, 2, RoundingMode.HALF_UP)`) : en finance, c'est moi qui choisis l'arrondi.
+
+**Lire une erreur de démarrage**
+- Descendre au **dernier** `Caused by:` (la cause racine), sauter les noms de classes, lire le message.
+- Ex : `wrong column type encountered in column [currency] in table [accounts]; found [bpchar (Types#CHAR)], but expecting [varchar(255) (Types#VARCHAR)]`
+  → un `String` Java attend `varchar` ; la base avait `CHAR(3)` (`bpchar` = nom interne Postgres). `TEXT` passe car vu comme `varchar`.
+- Deux corrections possibles : côté Java (`@JdbcTypeCode(SqlTypes.CHAR)` + `@Column(length = 3)`) ou côté base. Choix : la base (cohérence « `TEXT` partout » ; Postgres déconseille `CHAR(n)`, qui complète avec des espaces).
+
+**Ma première migration `V2`** (`V2__currency_en_text.sql`) : `V1` est partagée (mergée sur `main`) → on n'y touche plus, on ajoute.
+```sql
+ALTER TABLE accounts ALTER COLUMN currency TYPE TEXT;
+ALTER TABLE accounts ADD CONSTRAINT accounts_currency_chk CHECK (char_length(currency) = 3 AND currency ~ '^[A-Z]{3}$');
+```
+- `AND` combine deux conditions dans un `CHECK` ; deux contraintes séparées donnent des messages d'erreur plus précis.
+- `upper(x) = x` ne suffit pas pour « que des lettres » (`'E1R'` passe). Regex Postgres : `~ '^[A-Z]{3}$'` = début, une majuscule, 3 fois, fin (le `char_length` devient redondant).
+
+**`AccountRepository` : l'anti-IDOR devient du code**
+```java
+public interface AccountRepository extends JpaRepository<Account, UUID> {   // interface, pas class !
+    Optional<Account> findByIdAndUserId(UUID id, UUID userId);   // un compte, seulement s'il est à moi
+    List<Account> findAllByUserId(UUID userId);                  // mes comptes
+}
+```
+- Tout rouge d'un coup = souvent une erreur sur la ligne de déclaration (`class` au lieu de `interface`).
+- `Optional` = 0 ou 1 résultat ; `List` = 0 à n (liste vide, jamais `null`).
+- Le **nom** dit le type des paramètres : `...AndUserId` → un `UUID`, pas un `User`.
+- **Traversée de relation** : pas de champ `userId` → Spring coupe `User` + `Id` → `user.id`. Requête : `where a.id = ?1 and a.user.id = ?2`, filtrée directement sur la colonne `user_id` (pas de jointure). Explicite : `findByIdAndUser_Id`.
+- Spring analyse tous les noms au **démarrage** : une faute (`findByUsrId`) → `No property 'usrId' found for type 'Account'`. Pour les requêtes compliquées : `@Query` (dashboard).
+
 ---
 
 ## 7. Java : records, Lombok, injection
