@@ -1,7 +1,7 @@
 # Notes d'apprentissage
 
 Ce que j'apprends en construisant le projet, à relire avant les entretiens.
-Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 10/10/2026 (séances 1 à 5).
+Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 17/10/2026 (séances 1 à 8).
 Les séances où une notion a été vue sont indiquées entre parenthèses, pour retrouver le contexte dans `journal.md`.
 
 ## Sommaire
@@ -12,12 +12,12 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 3. [Écrire du SQL (une migration)](#3-écrire-du-sql-une-migration)
 4. [Flyway et les migrations](#4-flyway-et-les-migrations)
 5. [psql](#5-psql)
-6. [JPA : les relations](#6-jpa--les-relations)
+6. [JPA : entités, relations, repositories, tests](#6-jpa--entités-relations-repositories-tests)
 7. [Java : records, Lombok, injection](#7-java--records-lombok-injection)
 8. [Docker et docker compose](#8-docker-et-docker-compose)
 9. [YAML](#9-yaml)
 10. [Secrets et configuration](#10-secrets-et-configuration)
-11. [Environnement de dev (Mac)](#11-environnement-de-dev-mac)
+11. [Environnement de dev et débogage](#11-environnement-de-dev-et-débogage)
 
 ---
 
@@ -34,6 +34,10 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | Anti-IDOR en écriture | « Le filtre par utilisateur est fait dans le service, et la base le garantit avec des clés étrangères composites. » | 2.4 |
 | `@OneToMany` | « J'évite le `@OneToMany` parce qu'un simple getter peut charger toute une collection sans que ça se voie dans le code. Quand j'ai besoin du côté "plusieurs", je passe par le repository, avec une pagination. » | 6 |
 | `@Data` sur une entité | « Jamais : son `toString`/`equals`/`hashCode` parcourent les relations → requêtes en cascade, voire boucle infinie. » | 7 |
+| Constructeur `protected` | « Obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. `protected` : mon code ne peut pas créer d'entité incomplète, Hibernate et ses proxies peuvent l'utiliser. » | 6.1 |
+| `Optional` | « `Optional` rend l'absence explicite : l'appelant est obligé de la gérer, au lieu d'un `null` qui finit en `NullPointerException`. » | 6.3 |
+| Test anti-IDOR | « Je teste le cas négatif ET le cas positif : un test qui ne vérifie que l'absence passerait avec une méthode qui ne renvoie jamais rien. » | 6.4 |
+| Schéma en entreprise | « Migrations versionnées (Flyway/Liquibase) et Hibernate en `validate` : `ddl-auto=update` n'a ni historique ni review, et ne sait pas renommer. » | 4 |
 | Dans le doute | « Je choisis l'option qu'on peut assouplir plus tard : une erreur se corrige, des données effacées sont perdues. » | 2.5 |
 
 ---
@@ -74,6 +78,11 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 - En base : **`NUMERIC(12,2)`** (exact, 2 décimales, jusqu'à 9 999 999 999,99). En Java : **`BigDecimal`**,
   comparé avec `compareTo` (pas `equals` : `2.0` et `2.00` ne sont pas `equals`).
 - `INT` est pire : il **arrondit en silence** (1 234,56 → 1 235), sans erreur.
+
+- **Pourquoi `BigDecimal` est exact** (séance 7) : pas de virgule stockée, deux **entiers** : `12,34 = 1234 × 10⁻²` (`unscaledValue` = `BigInteger` illimité, `scale`). Base 10 → `0,1` exact.
+  Un `double` est en **base 2**, où `0,1` est infini (`0,000110011…`, comme `1/3` en base 10) → tronqué.
+  ⚠️ `new BigDecimal(0.1)` recopie l'erreur du `double` → `new BigDecimal("0.10")`, `BigDecimal.valueOf(...)`, `BigDecimal.ZERO`.
+  Division : `1/3` → `ArithmeticException` sans règle d'arrondi (`divide(x, 2, RoundingMode.HALF_UP)`) : en finance, c'est moi qui choisis l'arrondi.
 
 ### 1.4 Les dates (séance 3)
 
@@ -305,6 +314,19 @@ Prix : de la place, et une mise à jour à chaque écriture → seulement là o�
 - **Migration transactionnelle** (Postgres) : une erreur dans le fichier annule **tout** le fichier ; on corrige et on relance, sans rien nettoyer.
 - `spring.jpa.hibernate.ddl-auto=validate` : c'est Flyway qui crée le schéma, Hibernate vérifie seulement qu'il correspond aux entités.
 
+- **Ma première `V2`** (séance 7, `V2__currency_en_text.sql`) : `V1` étant mergée sur `main`, on n'y touche plus, on ajoute :
+  ```sql
+  ALTER TABLE accounts ALTER COLUMN currency TYPE TEXT;
+  ALTER TABLE accounts ADD CONSTRAINT accounts_currency_chk CHECK (char_length(currency) = 3 AND currency ~ '^[A-Z]{3}$');
+  ```
+  Pourquoi : `CHAR(3)` ≠ `varchar` attendu par un `String` (erreur de validation) ; cohérence « `TEXT` partout » ; Postgres déconseille `CHAR(n)` (complète avec des espaces).
+  `AND` combine deux conditions dans un `CHECK` (deux contraintes séparées = messages d'erreur plus précis). `upper(x) = x` laisse passer `'E1R'` ; la regex `~ '^[A-Z]{3}$'` impose 3 lettres majuscules (le `char_length` devient redondant).
+- **`checksum mismatch for migration version 1`** (séance 8) : le fichier `V1` a été modifié **par accident** (un copier-coller dans le mauvais onglet).
+  `git status` → `M V1__init.sql`, `git diff` → la ligne cassée, `git restore <fichier>` → réparé. Flyway a joué son rôle : sans checksum, deux bases auraient divergé en silence.
+- **En entreprise** : très majoritairement « migrations d'abord » (Flyway ou Liquibase, Hibernate en `validate`/`none`). `ddl-auto=update` est banni en prod
+  (ne sait ni renommer ni supprimer, aucun historique ni review, ignore les contraintes fines, modifie la prod au démarrage). Variante : générer un script depuis les entités puis le corriger à la main.
+  À regarder sur ABACUS : `db/migration` (Flyway) ou `db/changelog` (Liquibase), et la valeur de `ddl-auto`.
+
 ---
 
 ## 5. psql
@@ -325,132 +347,136 @@ Console SQL dans le conteneur : `docker compose exec db psql -U budget -d budget
 
 ---
 
-## 6. JPA : les relations
+## 6. JPA : entités, relations, repositories, tests
 
-(séance 3 ; LAZY / EAGER et N+1 à voir en pratique à la séance des entités)
+(séances 3, 6, 7, 8)
 
-**L'idée** : en SQL, une relation = une colonne FK du côté « plusieurs ». En Java on manipule des objets (`transaction.getAccount().getName()`), JPA fait le pont :
-```java
-// dans Transaction
-@ManyToOne(fetch = FetchType.LAZY)   // ⚠️ @ManyToOne est EAGER par défaut
-@JoinColumn(name = "account_id")     // la colonne FK en base
-private Account account;             // un objet, pas un UUID
-```
-
-**Lire le nom de l'annotation** : le 1er mot = la classe où je suis, le 2e = le champ. `@ManyToOne` dans `Transaction` = « plusieurs transactions → un compte ».
-
-| Champ | Annotation |
-| --- | --- |
-| `Transaction.account`, `Transaction.category`, `Budget.category`, `Account.user` | `@ManyToOne` |
-| `Account.transactions` (liste, si on la déclarait) | `@OneToMany(mappedBy = "account")` |
-
-- **Mon erreur** : `Transaction.category` en `@OneToOne`, en regardant un seul sens. Une catégorie a plein de transactions → `@ManyToOne`.
-  Un vrai `@OneToOne` = chaque catégorie ne servirait qu'à une transaction (rare : un user et sa photo de profil).
-- **Propriétaire / inverse** : le `@ManyToOne` (avec `@JoinColumn`) est le **propriétaire**, il écrit la FK. Le `@OneToMany(mappedBy = ...)` est l'**inverse**, en lecture seule.
-  Les deux déclarés = **bidirectionnelle** ; un seul = **unidirectionnelle**.
-- **Pas de `@OneToMany` dans le projet** : `account.getTransactions()` ressemble à un getter mais lance en cachette `SELECT * FROM transactions WHERE account_id = ...`
-  (5 000 objets chargés, invisible dans le code). On passe par le repository, visible et paginé :
-  `transactionRepository.findByAccountIdAndUserId(accountId, userId, PageRequest.of(0, 20))`.
-  Nuance : acceptable quand le « plusieurs » est petit et toujours utile avec le parent (une commande et ses 3 lignes).
-- **Choix du projet : relations unidirectionnelles, seulement des `@ManyToOne(fetch = LAZY)`.**
-
-### Entités et repositories (séance 6)
+### 6.1 Une entité
 
 **Une entité = une classe Java liée à une table** (un objet = une ligne, un champ = une colonne).
-Avec `spring.jpa.hibernate.ddl-auto=validate`, Hibernate vérifie au démarrage que chaque entité colle à la table créée par Flyway :
-si l'appli démarre (`Started BudgetApplication`), l'entité est bonne ; sinon l'erreur nomme la colonne fautive.
+Avec `ddl-auto=validate`, Hibernate vérifie au démarrage que chaque entité colle à la table créée par Flyway :
+`Started BudgetApplication` = l'entité est bonne ; sinon l'erreur nomme la colonne fautive (voir 11.2 pour la lire).
 
 ```java
 @Entity
 @Table(name = "users")          // obligatoire : sinon Hibernate cherche "user", mot réservé en Postgres
 public class User {
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)   // UUID généré en Java avant l'INSERT
+    @GeneratedValue(strategy = GenerationType.UUID)   // UUID généré en Java juste avant l'INSERT (id = null avant le save)
     private UUID id;                                   // java.util.UUID ↔ uuid Postgres
     private String passwordHash;                       // camelCase → password_hash automatiquement
-    private Instant createdAt = Instant.now();         // valeur donnée en Java (voir piège)
+    private Instant createdAt = Instant.now();         // valeur donnée en Java (piège ci-dessous)
 
     protected User() {}                                // pour JPA
     public User(String email, String passwordHash, String displayName) {
         this.email = email.trim().toLowerCase(Locale.ROOT);   // normalisation de l'email
         ...
     }
-    // getters seulement : pas de setter sur id ni createdAt
+    // getters seulement (générés avec Cmd + N) : pas de setter sur id ni createdAt
 }
 ```
 
-- **Piège `createdAt`** : Hibernate envoie **toutes** les colonnes dans l'`INSERT`, même à `null` → le `DEFAULT now()` de la base ne s'applique jamais et le `NOT NULL` refuse. Donner la valeur en Java.
-- **`@Column(name = ...)` inutile** quand le nom suit la convention (Spring convertit le camelCase en snake_case).
-- **`@Column(nullable = false)` inutile ici** : il ne sert que si Hibernate crée les tables ; `validate` ne vérifie pas le `NOT NULL`.
-  La règle vit dans la base (garantie) et dans le DTO (`@NotBlank`, `@Email` → 400 clair).
-- **Normaliser l'email dans le constructeur** : impossible de créer un `User` avec des majuscules. `Locale.ROOT` évite le piège du turc (`"I".toLowerCase()` ≠ `"i"`).
-  Il faudra aussi normaliser l'email reçu au **login** avant `findByEmail`.
+- **Piège des `DEFAULT`** : Hibernate envoie **toutes** les colonnes dans l'`INSERT`, même à `null`. Un `DEFAULT` ne s'applique que quand la colonne **manque** de l'`INSERT` → jamais ici, et le `NOT NULL` refuse.
+  → Donner la valeur en Java pour **chaque** colonne qui a un `DEFAULT` : `createdAt = Instant.now()`, `currency = "EUR"`, `initialBalance = BigDecimal.ZERO`.
+- **Le constructeur sans argument, en `protected`** :
+  - JPA crée l'objet **vide** puis remplit les champs par **réflexion** (il ne sait pas quel paramètre va à quelle colonne).
+  - Pas `public` : mon code ne peut pas créer une entité incomplète (`new User()` sans email).
+  - Pas `private` : pour le `LAZY`, Hibernate crée des **proxies** = des sous-classes de l'entité, qui doivent appeler le constructeur parent.
+  - Phrase d'entretien : « Le constructeur sans argument est obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. Je le mets en `protected` pour que mon code ne puisse pas créer d'entité incomplète, tout en laissant Hibernate et ses proxies l'utiliser. »
+- **Un champ optionnel** (`Category.color`) peut être `null` sans problème (colonne nullable, pas de `DEFAULT` à contourner) ; c'est à la **lecture** qu'il faut gérer l'absence.
+  Option : deux constructeurs chaînés (`this(user, name, kind, null)`) ; ou un getter `Optional<String>` (`Optional.ofNullable(color)`) — le **champ** reste un `String`.
+- **Inutiles ici** : `@Column(name = ...)` quand le nom suit la convention ; `@Column(nullable = false)` et `@Table(indexes = ...)`, qui ne servent que si Hibernate crée les tables (`validate` ne vérifie ni le `NOT NULL` ni les index). La règle vit dans la base (garantie) et dans le DTO (`@NotBlank`, `@Email` → 400 clair).
+- **Normaliser l'email dans le constructeur** : impossible de créer un `User` avec des majuscules. `Locale.ROOT` évite le piège du turc (`"I".toLowerCase()` ≠ `"i"`). Il faudra aussi normaliser l'email reçu au **login**.
 
-**Le constructeur sans argument, en `protected`**
-- JPA crée l'objet **vide** puis remplit les champs par **réflexion** : il ne sait pas utiliser un constructeur à paramètres.
-- `protected` et pas `public` : mon code ne peut pas créer un `User` incomplet par erreur (`new User()` sans email).
-- Pas `private` : pour le `LAZY`, Hibernate crée des **proxies** = des sous-classes de l'entité, qui doivent appeler le constructeur parent.
-- Phrase d'entretien : « Le constructeur sans argument est obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. Je le mets en `protected` pour que mon code ne puisse pas créer d'entité incomplète, tout en laissant Hibernate et ses proxies l'utiliser. »
+### 6.2 Les relations
 
-**Le repository (Spring Data)** : une simple interface, Spring génère l'implémentation au démarrage.
+**L'idée** : en SQL, une relation = une colonne FK du côté « plusieurs ». En Java on manipule des objets, JPA fait le pont.
+
 ```java
-public interface UserRepository extends JpaRepository<User, UUID> {   // <entité, type de la clé primaire>
-    Optional<User> findByEmail(String email);   // Optional : "il peut ne rien y avoir", l'appelant est obligé de gérer le cas
-    boolean existsByEmail(String email);        // pour renvoyer 409 à l'inscription
-}
-```
-- `JpaRepository` donne gratuitement `save`, `findById`, `findAll`, `deleteById`, `count`…
-- Les requêtes sont déduites du **nom de la méthode** : mot-clé (`find…By`, `exists…By`, `count…By`) + **nom du champ Java**.
-  `findByEmail` plutôt que `findUserByEmail` (le mot entre `find` et `By` est ignoré).
-- Retourner `User` au lieu de `Optional<User>` marche (null si absent) mais cache le cas « absent » → `NullPointerException` un jour.
+@ManyToOne(fetch = FetchType.LAZY)   // plusieurs comptes → un user ; ⚠️ EAGER par défaut
+@JoinColumn(name = "user_id")        // la colonne FK dans MA table (accounts)
+private User user;                   // un objet, pas un UUID
 
-
-**Relation `@ManyToOne` en pratique (séance 7, `Account`)**
-```java
-@ManyToOne(fetch = FetchType.LAZY)   // plusieurs comptes → un user ; LAZY sinon EAGER par défaut
-@JoinColumn(name = "user_id")        // la colonne FK en base (un uuid, rien ne change côté SQL)
-private User user;                   // côté Java : un objet, pas un id
-
-@Enumerated(EnumType.STRING)         // écrit le NOM de la valeur ("COURANT") → doit être identique au CHECK de la base
+@Enumerated(EnumType.STRING)         // écrit le NOM de la valeur ("COURANT") → identique au CHECK de la base. Jamais ORDINAL.
 private AccountType type;            // enum plutôt que String : le compilateur refuse "Courant"
 ```
-- `UUID userId` à la place de la relation est défendable (simple), mais `userId`, `accountId`, `categoryId` sont tous des `UUID` → les inverser compile sans erreur. Avec `User user`, le compilateur protège. Choix du projet : `@ManyToOne`.
-- Pour créer un `Account` à partir de l'id du token : `userRepository.getReferenceById(userId)` donne un `User` (proxy) **sans requête SQL**.
-- Même piège que `createdAt` pour toutes les colonnes avec `DEFAULT` en base : `currency = "EUR"`, `initialBalance = BigDecimal.ZERO` en Java.
-- Le montant initial est dans le constructeur (pas de setter : sinon impossible de créer un Livret A à 1 234,56 €).
 
-**`BigDecimal` : comment c'est exact ?**
-- Pas de virgule stockée : deux **entiers**. `12,34 = 1234 × 10⁻²` (`unscaledValue` = `BigInteger` de taille illimitée, `scale` = position de la virgule). Base 10 → `0,1` exact.
-- Un `double` est en **base 2** : `0,1` y est infini (`0,000110011…`), comme `1/3` en base 10 → tronqué.
-- ⚠️ `new BigDecimal(0.1)` recopie l'erreur du `double` → toujours `new BigDecimal("0.10")` ou `BigDecimal.valueOf(...)`. Zéro : `BigDecimal.ZERO`.
-- Division : `1/3` → `ArithmeticException` sans règle d'arrondi (`divide(x, 2, RoundingMode.HALF_UP)`) : en finance, c'est moi qui choisis l'arrondi.
+- **Lire le nom de l'annotation** : 1er mot = la classe où je suis. `@ManyToOne` dans `Account` = « plusieurs comptes → un user ».
+  Poser la question **dans les deux sens** (mon erreur : `Transaction.category` en `@OneToOne`).
+- **Comment Hibernate fait la jointure** : `@JoinColumn` donne la colonne de **ma** table ; le **type** du champ (`User`) donne l'entité visée, dont `@Table` et `@Id` donnent la cible → `accounts.user_id` → `users.id`.
+  Sans `@JoinColumn`, nom par défaut = `<champ>_<id cible>` = `user_id` (on le garde pour être explicite).
+- **`LAZY` en pratique** : au chargement d'un compte, Hibernate crée un proxy de `User` qui ne connaît que son id. `getUser().getId()` → aucune requête ; `getUser().getEmail()` → `SELECT … FROM users WHERE id = ?`.
+- **`@ManyToOne` plutôt que `UUID userId`** : les deux se défendent, mais `userId`, `accountId`, `categoryId` sont tous des `UUID` → les inverser compile sans erreur ; avec des objets, le compilateur protège.
+  Créer un `Account` depuis l'id du token : `userRepository.getReferenceById(userId)` donne un proxy **sans requête SQL**.
+- **Propriétaire / inverse** : le `@ManyToOne` (avec `@JoinColumn`) écrit la FK ; un `@OneToMany(mappedBy = ...)` serait l'inverse, en lecture seule. Les deux = bidirectionnelle.
+- **Pas de `@OneToMany` dans le projet** : `account.getTransactions()` ressemble à un getter mais lance en cachette `SELECT * FROM transactions WHERE account_id = ...` (5 000 objets, invisible dans le code).
+  On passe par le repository, visible et paginé. Nuance : acceptable si le « plusieurs » est petit et toujours utile (une commande et ses 3 lignes).
+  Phrase d'entretien dans le §0. **Choix du projet : unidirectionnel, seulement des `@ManyToOne(fetch = LAZY)`.**
+- **Un enum partagé** (`DEPENSE`/`REVENU` pour les catégories et les transactions) : un seul, rangé dans le domaine qui le « possède » → `transaction/TransactionKind`.
+  Pas de package « tous les enums » (rangement par nature technique au lieu de par fonctionnalité) ; et `enum` est un mot réservé, impossible comme nom de package.
 
-**Lire une erreur de démarrage**
-- Descendre au **dernier** `Caused by:` (la cause racine), sauter les noms de classes, lire le message.
-- Ex : `wrong column type encountered in column [currency] in table [accounts]; found [bpchar (Types#CHAR)], but expecting [varchar(255) (Types#VARCHAR)]`
-  → un `String` Java attend `varchar` ; la base avait `CHAR(3)` (`bpchar` = nom interne Postgres). `TEXT` passe car vu comme `varchar`.
-- Deux corrections possibles : côté Java (`@JdbcTypeCode(SqlTypes.CHAR)` + `@Column(length = 3)`) ou côté base. Choix : la base (cohérence « `TEXT` partout » ; Postgres déconseille `CHAR(n)`, qui complète avec des espaces).
+### 6.3 Les repositories (Spring Data)
 
-**Ma première migration `V2`** (`V2__currency_en_text.sql`) : `V1` est partagée (mergée sur `main`) → on n'y touche plus, on ajoute.
-```sql
-ALTER TABLE accounts ALTER COLUMN currency TYPE TEXT;
-ALTER TABLE accounts ADD CONSTRAINT accounts_currency_chk CHECK (char_length(currency) = 3 AND currency ~ '^[A-Z]{3}$');
-```
-- `AND` combine deux conditions dans un `CHECK` ; deux contraintes séparées donnent des messages d'erreur plus précis.
-- `upper(x) = x` ne suffit pas pour « que des lettres » (`'E1R'` passe). Regex Postgres : `~ '^[A-Z]{3}$'` = début, une majuscule, 3 fois, fin (le `char_length` devient redondant).
-
-**`AccountRepository` : l'anti-IDOR devient du code**
 ```java
-public interface AccountRepository extends JpaRepository<Account, UUID> {   // interface, pas class !
-    Optional<Account> findByIdAndUserId(UUID id, UUID userId);   // un compte, seulement s'il est à moi
+public interface AccountRepository extends JpaRepository<Account, UUID> {   // INTERFACE, <entité, type de l'id>
+    Optional<Account> findByIdAndUserId(UUID id, UUID userId);   // un compte, seulement s'il est à moi (anti-IDOR)
     List<Account> findAllByUserId(UUID userId);                  // mes comptes
 }
+// UserRepository : Optional<User> findByEmail(String email) ; boolean existsByEmail(String email) (409 à l'inscription)
 ```
-- Tout rouge d'un coup = souvent une erreur sur la ligne de déclaration (`class` au lieu de `interface`).
-- `Optional` = 0 ou 1 résultat ; `List` = 0 à n (liste vide, jamais `null`).
-- Le **nom** dit le type des paramètres : `...AndUserId` → un `UUID`, pas un `User`.
-- **Traversée de relation** : pas de champ `userId` → Spring coupe `User` + `Id` → `user.id`. Requête : `where a.id = ?1 and a.user.id = ?2`, filtrée directement sur la colonne `user_id` (pas de jointure). Explicite : `findByIdAndUser_Id`.
-- Spring analyse tous les noms au **démarrage** : une faute (`findByUsrId`) → `No property 'usrId' found for type 'Account'`. Pour les requêtes compliquées : `@Query` (dashboard).
+
+- Une **interface** : Spring génère l'implémentation au démarrage. `JpaRepository` donne gratuitement `save`, `saveAll(List.of(a, b))`, `findById`, `findAll`, `deleteById`, `count`…
+- La requête est déduite du **nom** : mot-clé (`find…By`, `exists…By`, `count…By`) + nom du **champ Java**. `findByEmail` plutôt que `findUserByEmail`.
+- **Traversée de relation** : pas de champ `userId` → Spring coupe `User` + `Id` → `user.id` → `where a.id = ?1 and a.user_id = ?2`, filtré directement sur la colonne FK (pas de jointure). Explicite : `findByIdAndUser_Id`.
+- Le **nom dit le type des paramètres** : `...AndUserId` → un `UUID`, pas un `User`.
+- **Types de retour** : `Optional` = 0 ou 1 résultat (l'appelant est **obligé** de gérer l'absence : `orElseThrow`, `isPresent`) ; `List` = 0 à n (liste vide, jamais `null`). Un `User` nu = `null` possible → `NullPointerException` un jour.
+- Spring analyse tous les noms au **démarrage** : une faute → `No property 'usrId' found for type 'Account'`. Requête trop compliquée pour un nom lisible → `@Query` (dashboard).
+- **Les index ne se déclarent pas ici** : ils vivent dans la base (Flyway), et le **planificateur** de Postgres les choisit tout seul pour chaque requête.
+  Ce qui compte : écrire des méthodes dont le `WHERE` correspond aux index (`findAllByUserIdOrderByDateDesc` ↔ `(user_id, date)`). Vérifiable avec `EXPLAIN`.
+
+### 6.4 Les tests de repository avec Testcontainers (séance 8)
+
+**Le principe** : un Postgres **jetable** lancé dans Docker pour le test ; Flyway y joue `V1` et `V2` → le vrai schéma ; on crée des données, on appelle le repository, on vérifie ; tout est annulé à la fin.
+
+```java
+@DataJpaTest                                                                 // seulement la partie JPA ; chaque test est rollbacké
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE) // garder la vraie base, pas une base en mémoire
+@Testcontainers
+class AccountRepositoryTest {
+
+    @Container                                                               // démarré avant les tests, arrêté après
+    @ServiceConnection                                                       // Spring branche la connexion tout seul
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");   // static = un seul conteneur pour la classe
+
+    @Autowired UserRepository userRepository;
+    @Autowired AccountRepository accountRepository;
+
+    @Test
+    void un_user_ne_voit_pas_le_compte_d_un_autre() {
+        // given : deux users, un compte à A — sauvegardés (sinon ils n'existent qu'en mémoire, id = null)
+        User userA = new User("usera@test.com", "password", "userA");
+        User userB = new User("userb@test.com", "password", "userB");
+        Account accountA = new Account(userA, "accountA", COURANT, BigDecimal.ZERO);
+        userRepository.save(userA);            // les users d'abord (le compte a une FK vers son user)
+        userRepository.save(userB);
+        accountRepository.save(accountA);
+        // when
+        Optional<Account> vuParA = accountRepository.findByIdAndUserId(accountA.getId(), userA.getId());
+        Optional<Account> vuParB = accountRepository.findByIdAndUserId(accountA.getId(), userB.getId());
+        // then
+        assertThat(vuParA).isPresent();        // sinon le test passerait aussi avec une méthode qui ne renvoie JAMAIS rien
+        assertThat(vuParB).isEmpty();
+    }
+}
+```
+
+- **Given / when / then** : préparer les données / appeler ce qu'on teste / vérifier.
+- Toujours tester **le cas positif ET le cas négatif** : un test qui ne vérifie que `isEmpty()` passerait avec un bug qui ne renvoie jamais rien.
+- `save` d'une **nouvelle** entité remplit l'`id` dans l'objet lui-même (on peut réutiliser `userA`). Bonne habitude plus tard : utiliser la valeur renvoyée (autre instance possible pour une entité déjà existante).
+- `assertThat` = méthode **statique** d'AssertJ : `import static org.assertj.core.api.Assertions.assertThat;` (déjà fournie par les dépendances de test de Spring Boot).
+- Les logs `Hibernate: insert ... / select ... where a1_0.id=? and a1_0.user_id=?` montrent le SQL généré : on y **voit** la traversée `user.id` → colonne `user_id`.
+- Lancer : triangle vert dans IntelliJ, ou `./mvnw test` dans `backend/`. Premier lancement plus long (démarrage du conteneur) ; Docker doit tourner.
+- Noms de variables qui disent ce que teste le test : `vuParA` / `vuParB` plutôt que `accountAtest`.
 
 ---
 
@@ -493,6 +519,13 @@ public class TransactionService {
 ```
 
 **Choix du projet** : pas de Lombok. Records pour les DTO, entités écrites normalement. Si un jour on l'ajoute : `@Getter`/`@Setter` sur les entités, jamais `@Data`.
+
+**`this.` implicite** (séance 8) : pour un nom seul, Java cherche d'abord une variable locale ou un paramètre, puis un champ de l'objet (`this.` implicite).
+Dans un getter, `return name;` = `return this.name;`. Dans le constructeur, le **paramètre** `name` masque le champ (*shadowing*) → `this.name = name;` obligatoire (`name = name;` ne ferait rien).
+
+**Chaînage de constructeurs** : `public Category(User user, String name, TransactionKind kind) { this(user, name, kind, null); }` → la logique reste à un seul endroit.
+
+**`Optional<T>`, `List<T>` sont génériques** : n'importe quel objet (`Optional<String>`, `Optional<User>`), pas de primitif (`Optional<int>` impossible → `Optional<Integer>` ou `OptionalInt`).
 
 ---
 
@@ -587,7 +620,9 @@ volumes:                                # à la racine : « ce volume existe dan
 
 ---
 
-## 11. Environnement de dev (Mac)
+## 11. Environnement de dev et débogage
+
+### 11.1 Environnement (Mac)
 
 (séances 1, 5)
 - La commande `java` lancée est la première trouvée dans le `PATH`, pas forcément `JAVA_HOME`.
@@ -595,3 +630,15 @@ volumes:                                # à la racine : « ce volume existe dan
 - Brew installe certaines versions en « keg-only » (`node@24`) : à ajouter au `PATH` à la main.
 - Une appli macOS lancée depuis Téléchargements est en lecture seule → la mettre dans Applications.
 - `./mvnw spring-boot:run` occupe le terminal : nouvel onglet (`Cmd + T`) ou `Ctrl + C` pour l'arrêter (la base et ses tables restent).
+
+### 11.2 Déboguer
+
+- **Lire une erreur de démarrage** : descendre au **dernier** `Caused by:` (la cause racine), sauter les noms de classes, lire le message.
+  Ex. : `wrong column type encountered in column [currency] in table [accounts]; found [bpchar (Types#CHAR)], but expecting [varchar(255) (Types#VARCHAR)]` → `String` attend `varchar`, la base avait `CHAR(3)` (`bpchar` = nom interne Postgres).
+  Corrections possibles : côté Java (`@JdbcTypeCode(SqlTypes.CHAR)` + `@Column(length = 3)`) ou côté base (choisi : `V2`, voir §4).
+- **« Ça marchait avant »** : `git status` (qu'est-ce qui a changé ?) puis `git diff` (comment ?). C'est comme ça qu'on a trouvé le `V1` modifié par accident.
+- **Tout est rouge d'un coup dans IntelliJ** : souvent une seule erreur sur la ligne de déclaration (`class` au lieu de `interface`).
+- **Lire le SQL généré** : les logs `Hibernate: insert/select ...` (actifs dans `@DataJpaTest`) montrent exactement ce qui part en base.
+- **git depuis le bon dossier** : l'invite doit afficher `budget-app %`, pas `backend %` (sinon `git add backend/...` → « ne correspond à aucun fichier »).
+  `git status` avant chaque commit : IntelliJ ajoute les **premières versions** des fichiers à leur création, il faut refaire `git add` avant de commiter.
+  zsh ne comprend pas les commentaires `# ...` collés dans une commande.

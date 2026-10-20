@@ -1,5 +1,5 @@
-package com.ilyas.budget.category;
+package com.ilyas.budget.transaction;
 
-public enum CategoryKind {
+public enum TransactionKind {
     DEPENSE, REVENU
 }
