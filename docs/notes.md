@@ -18,6 +18,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 9. [YAML](#9-yaml)
 10. [Secrets et configuration](#10-secrets-et-configuration)
 11. [Environnement de dev et débogage](#11-environnement-de-dev-et-débogage)
+12. [Architecture du code : packages et couches](#12-architecture-du-code--packages-et-couches)
 
 ---
 
@@ -90,6 +91,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 - `TIMESTAMPTZ` stocke un **instant** (converti en UTC) : même sens sur mon Mac à Paris et sur un serveur AWS en UTC. En Java : `Instant`.
   Malgré son nom, il ne garde pas le fuseau d'origine. `TIMESTAMP` (sans TZ) = une heure sans fuseau, ambiguë.
 - Piège : un 1er novembre stocké en `TIMESTAMPTZ` = 01/11 00h Paris = 31/10 23h UTC → rangé en **octobre** côté serveur.
+- **En Java** : `DATE` ↔ `LocalDate` (« local » = sans fuseau, « date » = juste le jour) ; `TIMESTAMPTZ` ↔ `Instant` (séance 9).
 - **`date` ≠ `created_at`** : courses samedi 31/10 saisies lundi 02/11 → `date` = 31/10 (compte dans le budget d'octobre),
   `created_at` = l'instant de saisie (technique : débogage, départager deux transactions du même jour).
 
@@ -100,6 +102,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 - ⚠️ **Le UUID ne protège PAS de l'IDOR.** La vraie protection : `findByIdAndUserId(id, moi)` (une ressource d'un autre → 404). Le UUID = **défense en profondeur**.
 - Coût : 16 octets au lieu de 8, illisible, index rempli dans le désordre (le UUID **v7**, trié par date, corrige ça ; Postgres 17 ne génère que du v4).
 - En SQL : `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` (intégré depuis Postgres 13).
+- **Clé technique vs clé naturelle** (séance 9) : pour retrouver UNE ligne, l'id suffit, pas besoin de chercher une combinaison de colonnes. Une transaction n'a pas de clé naturelle (deux cafés à 2 € le même jour) ; un budget si : `(user_id, category_id, month)`, garantie par le `UNIQUE`.
 
 ### 1.6 Mettre les règles dans la base (séances 2 à 5)
 
@@ -385,6 +388,9 @@ public class User {
   - Phrase d'entretien : « Le constructeur sans argument est obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. Je le mets en `protected` pour que mon code ne puisse pas créer d'entité incomplète, tout en laissant Hibernate et ses proxies l'utiliser. »
 - **Un champ optionnel** (`Category.color`) peut être `null` sans problème (colonne nullable, pas de `DEFAULT` à contourner) ; c'est à la **lecture** qu'il faut gérer l'absence.
   Option : deux constructeurs chaînés (`this(user, name, kind, null)`) ; ou un getter `Optional<String>` (`Optional.ofNullable(color)`) — le **champ** reste un `String`.
+  ⚠️ **Plusieurs champs optionnels** (`Transaction` : `category`, `note`) → **un seul constructeur complet**, l'appelant passe `null`. 2 optionnels = 4 constructeurs, 3 = 8, et on ne sait plus lequel prend quoi. Le service aura de toute façon des variables parfois `null` (venues de la requête HTTP) (séance 9).
+- **Normaliser dans le constructeur** (séance 9) : `this.month = month.withDayOfMonth(1)` dans `Budget`, comme l'email dans `User`. Le constructeur rend la donnée valide, la contrainte en base reste le filet de sécurité. Attention : le service devra aussi normaliser le mois **avant une recherche** (sinon un 15/10 ne trouve rien).
+- **Une FK composite en base ne change rien en Java** (séance 9) : `@JoinColumn(name = "account_id")` comme d'habitude ; `validate` ne vérifie pas les contraintes, c'est Postgres qui refuse la paire (compte, user) incohérente. Le code doit donc donner le même user à la transaction et à son compte.
 - **Inutiles ici** : `@Column(name = ...)` quand le nom suit la convention ; `@Column(nullable = false)` et `@Table(indexes = ...)`, qui ne servent que si Hibernate crée les tables (`validate` ne vérifie ni le `NOT NULL` ni les index). La règle vit dans la base (garantie) et dans le DTO (`@NotBlank`, `@Email` → 400 clair).
 - **Normaliser l'email dans le constructeur** : impossible de créer un `User` avec des majuscules. `Locale.ROOT` évite le piège du turc (`"I".toLowerCase()` ≠ `"i"`). Il faudra aussi normaliser l'email reçu au **login**.
 
@@ -398,6 +404,8 @@ public class User {
 private User user;                   // un objet, pas un UUID
 
 @Enumerated(EnumType.STRING)         // écrit le NOM de la valeur ("COURANT") → identique au CHECK de la base. Jamais ORDINAL.
+                                     // Oubli (séance 9) : ORDINAL par défaut = la POSITION (0, 1) → Hibernate attend un nombre, trouve TEXT → erreur de validation.
+                                     // Danger d'ORDINAL : ajouter une valeur au début de l'enum décale tout, DEPENSE devient REVENU sans erreur.
 private AccountType type;            // enum plutôt que String : le compilateur refuse "Courant"
 ```
 
@@ -428,7 +436,12 @@ public interface AccountRepository extends JpaRepository<Account, UUID> {   // I
 - Une **interface** : Spring génère l'implémentation au démarrage. `JpaRepository` donne gratuitement `save`, `saveAll(List.of(a, b))`, `findById`, `findAll`, `deleteById`, `count`…
 - La requête est déduite du **nom** : mot-clé (`find…By`, `exists…By`, `count…By`) + nom du **champ Java**. `findByEmail` plutôt que `findUserByEmail`.
 - **Traversée de relation** : pas de champ `userId` → Spring coupe `User` + `Id` → `user.id` → `where a.id = ?1 and a.user_id = ?2`, filtré directement sur la colonne FK (pas de jointure). Explicite : `findByIdAndUser_Id`.
-- Le **nom dit le type des paramètres** : `...AndUserId` → un `UUID`, pas un `User`.
+- Le **nom dit le type des paramètres** : `...AndUserId` → un `UUID`, pas un `User`. Paramètres en **camelCase** (`userId`), le snake_case c'est pour le SQL.
+  ⚠️ L'appli **démarre** même avec `findAllByUser(UUID userId)` : au démarrage Spring vérifie les noms de champs, pas le type des paramètres → l'erreur arrive au 1er appel. D'où les tests de repository (séance 9).
+- **Quelles méthodes écrire ?** (séance 9) Elles se **déduisent des écrans / endpoints** : « pour faire ça, quelles données je lis ? » → une méthode. Pas de méthode « au cas où » : on les ajoute quand le service en a besoin.
+  `existsByEmail` ← inscription (409) ; `findByEmail` ← login ; `findAllByUserId` ← « mes comptes » ; `findByIdAndUserId` ← ouvrir / modifier / supprimer **un** élément (`PUT /transactions/{id}`).
+- **Pas de `set…`** : les méthodes dérivées **lisent** (`find`, `exists`, `count`) ou `delete`. Écrire = `save()`. « Créer ou mettre à jour » (budget) = `find…` (Optional) dans le repo, puis le **service** décide : vide → `save(new Budget(...))`, présent → modifier le montant.
+- **Recherche partielle** : `findAllByUserIdAndLabelContainingIgnoreCase(userId, texte)` → `LIKE '%texte%'` sans tenir compte des majuscules. Au-delà de 2-3 critères combinés, les noms explosent → autre outil (séance 9 du plan).
 - **Types de retour** : `Optional` = 0 ou 1 résultat (l'appelant est **obligé** de gérer l'absence : `orElseThrow`, `isPresent`) ; `List` = 0 à n (liste vide, jamais `null`). Un `User` nu = `null` possible → `NullPointerException` un jour.
 - Spring analyse tous les noms au **démarrage** : une faute → `No property 'usrId' found for type 'Account'`. Requête trop compliquée pour un nom lisible → `@Query` (dashboard).
 - **Les index ne se déclarent pas ici** : ils vivent dans la base (Flyway), et le **planificateur** de Postgres les choisit tout seul pour chaque requête.
@@ -642,3 +655,35 @@ volumes:                                # à la racine : « ce volume existe dan
 - **git depuis le bon dossier** : l'invite doit afficher `budget-app %`, pas `backend %` (sinon `git add backend/...` → « ne correspond à aucun fichier »).
   `git status` avant chaque commit : IntelliJ ajoute les **premières versions** des fichiers à leur création, il faut refaire `git add` avant de commiter.
   zsh ne comprend pas les commentaires `# ...` collés dans une commande.
+
+---
+
+## 12. Architecture du code : packages et couches
+
+(séance 9)
+
+### 12.1 Découper par couche ou par fonctionnalité
+
+| | Par couche (Atos) | Par fonctionnalité (le projet) |
+|---|---|---|
+| Packages | `entity/`, `repository/`, `service/`, `controller/` | `account/`, `budget/`, `transaction/`… |
+| ✅ | simple, tout le monde sait où chercher | tout ce qui concerne les budgets au même endroit ; classes internes en visibilité package ; découpable en modules |
+| ❌ | gros packages sans lien ; une modif = 4 packages ; tout en `public` | réfléchir à la place des classes partagées (`TransactionKind`) |
+
+- Au travail : on suit la convention de l'équipe. La doc Spring Boot montre le découpage par fonctionnalité dans son exemple de structure.
+- **Un service qui mélange plusieurs objets** :
+  1. il vit dans la fonctionnalité qui porte l'action et appelle les autres (`AuthService` crée le user puis appelle `CategoryService` pour les catégories par défaut) ;
+  2. s'il mélange vraiment tout, il a son propre package (`dashboard/`) ;
+  3. **pas de cycle** : si `transaction/` appelle `account/`, `account/` n'appelle pas `transaction/`.
+- Phrase d'entretien : « Au travail on découpe par couche ; sur mon projet j'ai découpé par fonctionnalité pour garder chaque domaine regroupé et rendre visibles les dépendances entre domaines. »
+
+### 12.2 Qui fait quoi : repository, service, controller
+
+| Couche | Rôle | Ne fait jamais… |
+|---|---|---|
+| Repository | parler à la base : lire, écrire, supprimer | prendre une décision |
+| Service | les règles métier : décider, vérifier, combiner plusieurs repos | écrire du SQL, parler HTTP |
+| Controller | parler HTTP : recevoir la requête, renvoyer la réponse | contenir une règle métier |
+
+- Test rapide : si l'action se décrit avec « si… sinon… » ou une règle (« un budget par mois », « email unique ») → **service**.
+- Nuance : le repository peut **calculer** (somme des dépenses par catégorie en octobre), car la base le fait plus vite que Java ; comparer au budget et dire « dépassé » reste au service.
