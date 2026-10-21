@@ -19,6 +19,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 10. [Secrets et configuration](#10-secrets-et-configuration)
 11. [Environnement de dev et débogage](#11-environnement-de-dev-et-débogage)
 12. [Architecture du code : packages et couches](#12-architecture-du-code--packages-et-couches)
+13. [Sécurité de l'API : DTO, injections, mots de passe](#13-sécurité-de-lapi--dto-injections-mots-de-passe)
 
 ---
 
@@ -39,6 +40,9 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | `Optional` | « `Optional` rend l'absence explicite : l'appelant est obligé de la gérer, au lieu d'un `null` qui finit en `NullPointerException`. » | 6.3 |
 | Test anti-IDOR | « Je teste le cas négatif ET le cas positif : un test qui ne vérifie que l'absence passerait avec une méthode qui ne renvoie jamais rien. » | 6.4 |
 | Schéma en entreprise | « Migrations versionnées (Flyway/Liquibase) et Hibernate en `validate` : `ddl-auto=update` n'a ni historique ni review, et ne sait pas renommer. » | 4 |
+| DTO vs entité | « Je ne bind jamais une entité JPA sur une requête : un DTO limite ce que le client peut envoyer (pas de mass assignment) et ce que je renvoie (pas de hash qui fuit), et découple l'API du schéma. » | 13.1 |
+| Injection SQL | « Je n'assemble jamais une requête en concaténant une saisie : requêtes paramétrées, que Spring Data et JPA font pour moi. La valeur est envoyée à part, elle ne peut pas devenir du SQL. » | 13.2 |
+| Mot de passe | « Je valide la longueur plutôt que des règles de composition, comme le recommande le NIST, et je hashe avec BCrypt, plafonné à 72 octets. » | 13.3 |
 | Dans le doute | « Je choisis l'option qu'on peut assouplir plus tard : une erreur se corrige, des données effacées sont perdues. » | 2.5 |
 
 ---
@@ -531,6 +535,29 @@ public class TransactionService {
 }
 ```
 
+**Les beans : comment Spring sait quoi injecter** (séance 10)
+- Au démarrage, Spring crée lui-même certains objets et les garde dans son **contexte** (un grand sac d'objets prêts à l'emploi). Ces objets = des **beans**.
+- Deviennent des beans :
+  - les classes annotées `@Service`, `@RestController`, `@Configuration`… et les repositories (Spring génère leur implémentation) ;
+  - **ce que renvoie** une méthode `@Bean` dans une classe `@Configuration`.
+- **L'injection** : quand un constructeur demande un paramètre, Spring cherche dans le sac un bean **de ce type** et le passe. Personne n'écrit `new AuthService(...)`.
+- **Pourquoi `PasswordEncoder` et pas `PasswordConfig`** : `PasswordConfig` est la **recette**, le bean c'est le **plat** qu'elle renvoie (`new BCryptPasswordEncoder()`). Le service a besoin du plat, pas de la recette. Il demande l'**interface** `PasswordEncoder` : Spring trouve le bean `BCryptPasswordEncoder`, qui l'implémente. Changer d'algo = changer la config, le service ne bouge pas.
+- **Pourquoi `@Bean` plutôt que `@Service`** : `BCryptPasswordEncoder` vient d'une bibliothèque, on ne peut pas modifier sa classe pour l'annoter → on déclare une méthode `@Bean` qui le fabrique.
+- Erreur classique : `No qualifying bean of type 'PasswordEncoder'` = personne n'a déclaré ce bean (pas de `@Bean`, ou classe pas en `@Configuration`).
+
+**Les exceptions** (séance 10)
+- Une exception = un **objet** qui signale un problème. `throw new X(...)` **arrête la méthode tout de suite** (les lignes suivantes ne s'exécutent pas) et remonte la chaîne d'appels : service → controller → Spring, jusqu'à ce que quelqu'un l'**attrape** (`try { } catch (X e) { }`, ou un `@ExceptionHandler` côté Spring).
+  Personne ne l'attrape → Spring renvoie une **500**.
+- Deux familles :
+  - `extends Exception` = **checked** : le compilateur oblige à l'attraper ou à écrire `throws X` sur la méthode (lourd) ;
+  - `extends RuntimeException` = **unchecked** : aucune obligation. En Spring, les exceptions métier sont des `RuntimeException` (et `@Transactional` annule par défaut uniquement sur elles).
+- **Pourquoi une classe à soi** (`EmailDejaUtiliseException`) : son **nom** dit ce qui s'est passé. Le service lance l'exception (il ne parle pas HTTP) ; un `@ExceptionHandler(EmailDejaUtiliseException.class)` la traduit en **409** (séance 11).
+
+**L'héritage et `super`** (séance 10)
+- `class EmailDejaUtiliseException extends RuntimeException` : ma classe **est** une `RuntimeException`, avec tout ce qu'elle sait faire (un message, la stack trace…). Je n'ajoute que le nom et le message.
+- `super(...)` dans un constructeur = appeler le **constructeur du parent**. `super("Email déjà utilisé : " + email)` donne le message à `RuntimeException`, qui le stocke (lisible avec `getMessage()`, affiché dans les logs). Toujours la **première ligne** du constructeur.
+- Même idée que `this(...)` (chaînage) : `this(...)` appelle un autre constructeur de **ma** classe, `super(...)` celui de la classe **parente**.
+
 **Choix du projet** : pas de Lombok. Records pour les DTO, entités écrites normalement. Si un jour on l'ajoute : `@Getter`/`@Setter` sur les entités, jamais `@Data`.
 
 **`this.` implicite** (séance 8) : pour un nom seul, Java cherche d'abord une variable locale ou un paramètre, puis un champ de l'objet (`this.` implicite).
@@ -687,3 +714,46 @@ volumes:                                # à la racine : « ce volume existe dan
 
 - Test rapide : si l'action se décrit avec « si… sinon… » ou une règle (« un budget par mois », « email unique ») → **service**.
 - Nuance : le repository peut **calculer** (somme des dépenses par catégorie en octobre), car la base le fait plus vite que Java ; comparer au budget et dire « dépassé » reste au service.
+
+---
+
+## 13. Sécurité de l'API : DTO, injections, mots de passe
+
+(séance 10)
+
+### 13.1 Recevoir un DTO, jamais une entité
+
+**Le DTO** (*Data Transfer Object*) = un `record` qui décrit exactement le JSON échangé avec le front. `RegisterRequest(email, password, displayName)` en entrée, `UserResponse(id, email, displayName)` en sortie.
+
+**Pourquoi pas l'entité `User` directement ?** → le **mass assignment** : le client remplit des champs qu'il ne devrait pas contrôler.
+1. **`id`** : `"id": "<id d'un autre user>"` → `save()` sur un id existant fait un **UPDATE** → il écrase le compte d'un autre.
+2. **`passwordHash`** : le client envoie un faux « hash » stocké tel quel, sans BCrypt. Et l'entité n'a pas de champ `password` en clair.
+3. **`createdAt`** : le client choisirait sa date d'inscription.
+4. **En sortie** : renvoyer l'entité = le `passwordHash` dans le JSON. On ne fait jamais fuiter un hash.
+5. **Couplage** : sans DTO, l'API est collée à la base (renommer une colonne casse le front).
+
+**Règle : une entité ne sort jamais du service.** Le controller reçoit un DTO et renvoie un DTO.
+
+### 13.2 Injection SQL et requêtes paramétrées (préparées)
+
+**L'attaque** : si la requête est construite en **collant** la saisie dans le texte SQL :
+```java
+"SELECT * FROM users WHERE email = '" + email + "'"
+// email saisi : ' OR '1'='1   →   WHERE email = '' OR '1'='1'   → renvoie TOUS les users
+```
+la saisie devient du **code SQL**.
+
+**La parade : la requête paramétrée** (*prepared statement*). Le SQL est envoyé avec un trou (`WHERE email = ?`), la valeur est envoyée **à part**. La base sait que c'est une donnée, jamais du code : `' OR '1'='1` est cherché comme un email (et non trouvé).
+- Spring Data (`findByEmail`) et JPA le font **automatiquement** : c'est le `?` qu'on voit dans les logs `Hibernate: select ... where email=?`.
+- Le danger revient seulement si **je** concatène une chaîne dans une `@Query` ou une requête native. Avec `@Query`, toujours des paramètres : `WHERE u.email = :email`.
+- Conséquence : **filtrer les caractères à l'entrée n'est pas la protection** (et casse les vrais noms : « O'Brien », « Zoé »). On valide le **format** (email, longueur), la sécurité vient des requêtes paramétrées.
+
+**Le cousin côté front : le XSS** (un `<script>` dans un nom affiché). Protection : **échapper à l'affichage**. Angular le fait par défaut avec `{{ }}` (danger seulement avec `innerHTML` / `bypassSecurityTrust...`).
+
+### 13.3 Valider un mot de passe
+
+- Le **NIST** (référence en sécurité) déconseille d'imposer majuscule + chiffre + spécial : on obtient `Motdepasse1!`, facile à deviner, dur à retenir. **La longueur compte.**
+- Projet : **12 à 72 caractères** → `@Size(min = 12, max = 72)`. 72 = limite de **BCrypt** (il n'utilise que les 72 premiers octets ; Spring Security récent refuse au-delà).
+- Le DTO reçoit le mot de passe **en clair** ; le service le hashe ; seul le hash est stocké.
+- **Si une politique impose majuscule / chiffre** (souvent le client en entreprise) : `@Pattern`, une annotation par règle : `@Pattern(regexp = ".*[A-Z].*", message = "au moins une majuscule")`, `@Pattern(regexp = ".*\\d.*", message = "au moins un chiffre")` (`\\d` = un chiffre, `\` doublé dans une chaîne Java). `message` = le texte renvoyé au front, possible sur toutes les annotations.
+- Validation des autres champs : `@NotBlank @Email` pour l'email, `@NotBlank @Size(max = 50)` pour le display name (pas de filtre de caractères).
