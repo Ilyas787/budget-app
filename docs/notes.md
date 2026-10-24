@@ -1,7 +1,7 @@
 # Notes d'apprentissage
 
 Ce que j'apprends en construisant le projet, à relire avant les entretiens.
-Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 17/10/2026 (séances 1 à 8).
+Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 24/10/2026 (séances 1 à 11).
 Les séances où une notion a été vue sont indiquées entre parenthèses, pour retrouver le contexte dans `journal.md`.
 
 ## Sommaire
@@ -13,13 +13,14 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 4. [Flyway et les migrations](#4-flyway-et-les-migrations)
 5. [psql](#5-psql)
 6. [JPA : entités, relations, repositories, tests](#6-jpa--entités-relations-repositories-tests)
-7. [Java : records, Lombok, injection](#7-java--records-lombok-injection)
+7. [Java : les bases utiles au projet](#7-java--les-bases-utiles-au-projet)
 8. [Docker et docker compose](#8-docker-et-docker-compose)
 9. [YAML](#9-yaml)
 10. [Secrets et configuration](#10-secrets-et-configuration)
 11. [Environnement de dev et débogage](#11-environnement-de-dev-et-débogage)
 12. [Architecture du code : packages et couches](#12-architecture-du-code--packages-et-couches)
 13. [Sécurité de l'API : DTO, injections, mots de passe](#13-sécurité-de-lapi--dto-injections-mots-de-passe)
+14. [Spring : beans, API REST, erreurs, transactions](#14-spring--beans-api-rest-erreurs-transactions)
 
 ---
 
@@ -35,7 +36,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | UUID | « Le UUID n'empêche pas l'IDOR, c'est le filtre par utilisateur qui le fait. Le UUID ajoute une couche : on ne peut pas deviner les ids. » | 1.5 |
 | Anti-IDOR en écriture | « Le filtre par utilisateur est fait dans le service, et la base le garantit avec des clés étrangères composites. » | 2.4 |
 | `@OneToMany` | « J'évite le `@OneToMany` parce qu'un simple getter peut charger toute une collection sans que ça se voie dans le code. Quand j'ai besoin du côté "plusieurs", je passe par le repository, avec une pagination. » | 6 |
-| `@Data` sur une entité | « Jamais : son `toString`/`equals`/`hashCode` parcourent les relations → requêtes en cascade, voire boucle infinie. » | 7 |
+| `@Data` sur une entité | « Jamais : son `toString`/`equals`/`hashCode` parcourent les relations → requêtes en cascade, voire boucle infinie. » | 7.1 |
 | Constructeur `protected` | « Obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. `protected` : mon code ne peut pas créer d'entité incomplète, Hibernate et ses proxies peuvent l'utiliser. » | 6.1 |
 | `Optional` | « `Optional` rend l'absence explicite : l'appelant est obligé de la gérer, au lieu d'un `null` qui finit en `NullPointerException`. » | 6.3 |
 | Test anti-IDOR | « Je teste le cas négatif ET le cas positif : un test qui ne vérifie que l'absence passerait avec une méthode qui ne renvoie jamais rien. » | 6.4 |
@@ -43,6 +44,9 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | DTO vs entité | « Je ne bind jamais une entité JPA sur une requête : un DTO limite ce que le client peut envoyer (pas de mass assignment) et ce que je renvoie (pas de hash qui fuit), et découple l'API du schéma. » | 13.1 |
 | Injection SQL | « Je n'assemble jamais une requête en concaténant une saisie : requêtes paramétrées, que Spring Data et JPA font pour moi. La valeur est envoyée à part, elle ne peut pas devenir du SQL. » | 13.2 |
 | Mot de passe | « Je valide la longueur plutôt que des règles de composition, comme le recommande le NIST, et je hashe avec BCrypt, plafonné à 72 octets. » | 13.3 |
+| `@Valid` | « Sans `@Valid`, les annotations du DTO ne sont jamais vérifiées et rien ne plante : c'est la première chose que je regarde sur un endpoint. » | 14.3 |
+| Gestion des erreurs | « Les exceptions métier sont traduites en HTTP à un seul endroit, un `@RestControllerAdvice` qui renvoie du `ProblemDetail` : un format uniforme pour le front, pas de try/catch dupliqués. » | 14.5 |
+| `@Transactional` | « Une action métier qui écrit plusieurs fois est dans une transaction : tout ou rien. Sinon l'utilisateur reçoit une erreur alors que la moitié est en base. » | 14.6 |
 | Dans le doute | « Je choisis l'option qu'on peut assouplir plus tard : une erreur se corrige, des données effacées sont perdues. » | 2.5 |
 
 ---
@@ -497,9 +501,11 @@ class AccountRepositoryTest {
 
 ---
 
-## 7. Java : records, Lombok, injection
+## 7. Java : les bases utiles au projet
 
-(séance 2)
+(séances 2, 8, 10, 11)
+
+### 7.1 Records et Lombok (séances 2, 10)
 
 **Le problème** : une classe de données demande beaucoup de code répétitif (getters, setters, constructeurs, `equals`, `hashCode`, `toString`).
 
@@ -509,6 +515,8 @@ public record TransactionResponse(UUID id, BigDecimal amount, String label) {}
 ```
 Donne le constructeur complet, les accesseurs `id()`, `amount()`, `label()` (sans `get`), `equals`, `hashCode`, `toString`.
 Pas de setters, pas de constructeur vide, pas de builder → **inutilisables pour les entités JPA** (JPA veut un constructeur vide et des champs modifiables).
+- Annotations de validation devant chaque composant : `record RegisterRequest(@NotBlank @Email String email, ...)`. Un DTO de **sortie** (`UserResponse`) n'en a pas besoin : ce qui sort vient de la base, déjà validé (séance 10).
+- Un record est `final` (pas de sous-classe) → pas de proxy JPA possible : **record pour les DTO, classe classique pour les entités**.
 
 **Lombok** : génère ce code à la compilation à partir d'annotations (`@Getter`/`@Setter`, `@NoArgsConstructor`, `@AllArgsConstructor`,
 `@RequiredArgsConstructor` pour l'injection, `@Data` = le pack, `@Builder`).
@@ -523,27 +531,18 @@ Pas de setters, pas de constructeur vide, pas de builder → **inutilisables pou
 
 **Subtilité** : sans constructeur écrit, Java ajoute un constructeur vide invisible ; dès qu'on en écrit un avec paramètres, il disparaît (JPA en a besoin → l'écrire).
 
-**Injection par constructeur** (sans Lombok) :
-```java
-@Service
-public class TransactionService {
-    private final TransactionRepository repository;
+**Choix du projet** : pas de Lombok. Records pour les DTO, entités écrites normalement. Si un jour on l'ajoute : `@Getter`/`@Setter` sur les entités, jamais `@Data`.
 
-    public TransactionService(TransactionRepository repository) {
-        this.repository = repository;   // Spring injecte via ce constructeur
-    }
-}
-```
+### 7.2 Petites règles de syntaxe (séance 8)
 
-**Les beans : comment Spring sait quoi injecter** (séance 10)
-- Au démarrage, Spring crée lui-même certains objets et les garde dans son **contexte** (un grand sac d'objets prêts à l'emploi). Ces objets = des **beans**.
-- Deviennent des beans :
-  - les classes annotées `@Service`, `@RestController`, `@Configuration`… et les repositories (Spring génère leur implémentation) ;
-  - **ce que renvoie** une méthode `@Bean` dans une classe `@Configuration`.
-- **L'injection** : quand un constructeur demande un paramètre, Spring cherche dans le sac un bean **de ce type** et le passe. Personne n'écrit `new AuthService(...)`.
-- **Pourquoi `PasswordEncoder` et pas `PasswordConfig`** : `PasswordConfig` est la **recette**, le bean c'est le **plat** qu'elle renvoie (`new BCryptPasswordEncoder()`). Le service a besoin du plat, pas de la recette. Il demande l'**interface** `PasswordEncoder` : Spring trouve le bean `BCryptPasswordEncoder`, qui l'implémente. Changer d'algo = changer la config, le service ne bouge pas.
-- **Pourquoi `@Bean` plutôt que `@Service`** : `BCryptPasswordEncoder` vient d'une bibliothèque, on ne peut pas modifier sa classe pour l'annoter → on déclare une méthode `@Bean` qui le fabrique.
-- Erreur classique : `No qualifying bean of type 'PasswordEncoder'` = personne n'a déclaré ce bean (pas de `@Bean`, ou classe pas en `@Configuration`).
+**`this.` implicite** (séance 8) : pour un nom seul, Java cherche d'abord une variable locale ou un paramètre, puis un champ de l'objet (`this.` implicite).
+Dans un getter, `return name;` = `return this.name;`. Dans le constructeur, le **paramètre** `name` masque le champ (*shadowing*) → `this.name = name;` obligatoire (`name = name;` ne ferait rien).
+
+**Chaînage de constructeurs** : `public Category(User user, String name, TransactionKind kind) { this(user, name, kind, null); }` → la logique reste à un seul endroit.
+
+**`Optional<T>`, `List<T>` sont génériques** : n'importe quel objet (`Optional<String>`, `Optional<User>`), pas de primitif (`Optional<int>` impossible → `Optional<Integer>` ou `OptionalInt`).
+
+### 7.3 Exceptions et héritage (séance 10)
 
 **Les exceptions** (séance 10)
 - Une exception = un **objet** qui signale un problème. `throw new X(...)` **arrête la méthode tout de suite** (les lignes suivantes ne s'exécutent pas) et remonte la chaîne d'appels : service → controller → Spring, jusqu'à ce que quelqu'un l'**attrape** (`try { } catch (X e) { }`, ou un `@ExceptionHandler` côté Spring).
@@ -558,14 +557,62 @@ public class TransactionService {
 - `super(...)` dans un constructeur = appeler le **constructeur du parent**. `super("Email déjà utilisé : " + email)` donne le message à `RuntimeException`, qui le stocke (lisible avec `getMessage()`, affiché dans les logs). Toujours la **première ligne** du constructeur.
 - Même idée que `this(...)` (chaînage) : `this(...)` appelle un autre constructeur de **ma** classe, `super(...)` celui de la classe **parente**.
 
-**Choix du projet** : pas de Lombok. Records pour les DTO, entités écrites normalement. Si un jour on l'ajoute : `@Getter`/`@Setter` sur les entités, jamais `@Data`.
+### 7.4 Listes et Map (séance 11)
 
-**`this.` implicite** (séance 8) : pour un nom seul, Java cherche d'abord une variable locale ou un paramètre, puis un champ de l'objet (`this.` implicite).
-Dans un getter, `return name;` = `return this.name;`. Dans le constructeur, le **paramètre** `name` masque le champ (*shadowing*) → `this.name = name;` obligatoire (`name = name;` ne ferait rien).
+*Créer une liste*
+```java
+List<Category> fixe = List.of(a, b, c);        // NON modifiable : fixe.add(d) → UnsupportedOperationException
+List<Category> modifiable = new ArrayList<>(); // modifiable, vide au départ
+modifiable.add(a);                             // ajoute à la fin
+List<Category> copie = new ArrayList<>(fixe);  // copie modifiable d'une liste fixe
+```
+- `List` = l'**interface** (ce qu'on sait faire), `ArrayList` = une **implémentation** (comment c'est fait). On déclare avec l'interface : `List<Category> x = new ArrayList<>();` (même idée que `PasswordEncoder` / `BCryptPasswordEncoder`).
+- `<Category>` = le type des éléments (générique) ; jamais un primitif : `List<Integer>`, pas `List<int>`. `<>` à droite : Java devine le type.
+- `List.of(...)` : parfait quand la liste est connue d'avance (catégories par défaut) ; `new ArrayList<>()` quand on la remplit au fur et à mesure.
 
-**Chaînage de constructeurs** : `public Category(User user, String name, TransactionKind kind) { this(user, name, kind, null); }` → la logique reste à un seul endroit.
+*Les méthodes de base*
+| Méthode | Fait quoi | Exemple |
+|---|---|---|
+| `size()` | nombre d'éléments | `categories.size()` → 8 |
+| `get(i)` | l'élément à la position i (commence à **0**) | `categories.get(0)` → Logement |
+| `isEmpty()` | vide ? | `if (liste.isEmpty())` |
+| `contains(x)` | contient x ? (utilise `equals`) | `noms.contains("Loisirs")` |
+| `add(x)` / `remove(x)` | ajoute / retire (liste modifiable seulement) | |
 
-**`Optional<T>`, `List<T>` sont génériques** : n'importe quel objet (`Optional<String>`, `Optional<User>`), pas de primitif (`Optional<int>` impossible → `Optional<Integer>` ou `OptionalInt`).
+*Parcourir*
+```java
+for (Category c : categories) {        // for-each : « pour chaque c de la liste » (le plus courant)
+    System.out.println(c.getName());
+}
+for (int i = 0; i < categories.size(); i++) {   // for classique : seulement si on a besoin de l'indice i
+    Category c = categories.get(i);
+}
+```
+
+*Les Map (dictionnaires)* — vues dans `GestionErreurs`
+```java
+Map<String, String> erreurs = new HashMap<>();   // clé → valeur
+erreurs.put("password", "trop court");          // ajoute (ou remplace si la clé existe déjà)
+erreurs.get("password");                        // → "trop court" (null si absente)
+erreurs.containsKey("email");                   // → false
+for (Map.Entry<String, String> e : erreurs.entrySet()) {   // parcourir les paires
+    System.out.println(e.getKey() + " : " + e.getValue());
+}
+```
+- Une clé est **unique** : un 2e `put` sur la même clé écrase l'ancienne valeur.
+- `Map.of("a", "1", "b", "2")` existe aussi (non modifiable, comme `List.of`).
+
+*Les streams : un avant-goût* (très courants en entreprise)
+Une façon de transformer une liste en une seule expression, sans boucle :
+```java
+List<String> noms = categories.stream()
+        .filter(c -> c.getKind() == TransactionKind.DEPENSE)   // garde seulement les dépenses
+        .map(Category::getName)                                 // transforme chaque catégorie en son nom
+        .toList();                                              // → ["Logement", "Alimentation", ...]
+```
+- `c -> ...` = une **lambda** (une petite fonction sans nom) ; `Category::getName` = raccourci pour `c -> c.getName()`.
+- Équivalent avec une boucle : `new ArrayList<>()` vide, un for-each, un `if`, un `add`. Les deux se valent ; le stream est plus court quand on enchaîne filtre + transformation.
+- Le `for` de `GestionErreurs` en stream : `e.getBindingResult().getFieldErrors().stream().collect(Collectors.toMap(FieldError::getField, FieldError::getDefaultMessage))` (mais plante si un champ a 2 erreurs → la boucle est plus sûre ici).
 
 ---
 
@@ -757,3 +804,139 @@ la saisie devient du **code SQL**.
 - Le DTO reçoit le mot de passe **en clair** ; le service le hashe ; seul le hash est stocké.
 - **Si une politique impose majuscule / chiffre** (souvent le client en entreprise) : `@Pattern`, une annotation par règle : `@Pattern(regexp = ".*[A-Z].*", message = "au moins une majuscule")`, `@Pattern(regexp = ".*\\d.*", message = "au moins un chiffre")` (`\\d` = un chiffre, `\` doublé dans une chaîne Java). `message` = le texte renvoyé au front, possible sur toutes les annotations.
 - Validation des autres champs : `@NotBlank @Email` pour l'email, `@NotBlank @Size(max = 50)` pour le display name (pas de filtre de caractères).
+
+---
+
+## 14. Spring : beans, API REST, erreurs, transactions
+
+(séances 2, 10, 11)
+
+### 14.1 Beans et injection (séances 2, 10)
+
+**L'injection par constructeur** (sans Lombok) : personne n'écrit `new AuthService(...)`, Spring passe les dépendances.
+```java
+@Service
+public class TransactionService {
+    private final TransactionRepository repository;
+
+    public TransactionService(TransactionRepository repository) {
+        this.repository = repository;   // Spring injecte via ce constructeur
+    }
+}
+```
+
+- Au démarrage, Spring crée lui-même certains objets et les garde dans son **contexte** (un grand sac d'objets prêts à l'emploi). Ces objets = des **beans**.
+- Deviennent des beans :
+  - les classes annotées `@Service`, `@RestController`, `@Configuration`… et les repositories (Spring génère leur implémentation) ;
+  - **ce que renvoie** une méthode `@Bean` dans une classe `@Configuration`.
+- **L'injection** : quand un constructeur demande un paramètre, Spring cherche dans le sac un bean **de ce type** et le passe. Personne n'écrit `new AuthService(...)`.
+- **Pourquoi `PasswordEncoder` et pas `PasswordConfig`** : `PasswordConfig` est la **recette**, le bean c'est le **plat** qu'elle renvoie (`new BCryptPasswordEncoder()`). Le service a besoin du plat, pas de la recette. Il demande l'**interface** `PasswordEncoder` : Spring trouve le bean `BCryptPasswordEncoder`, qui l'implémente. Changer d'algo = changer la config, le service ne bouge pas.
+- **Pourquoi `@Bean` plutôt que `@Service`** : `BCryptPasswordEncoder` vient d'une bibliothèque, on ne peut pas modifier sa classe pour l'annoter → on déclare une méthode `@Bean` qui le fabrique.
+- Erreur classique : `No qualifying bean of type 'PasswordEncoder'` = personne n'a déclaré ce bean (pas de `@Bean`, ou classe pas en `@Configuration`).
+
+### 14.2 Le parcours d'une requête (séance 11)
+
+```
+curl / front ── POST /auth/register (JSON) ──▶ AuthController    @Valid : format KO → 400 (avant le service)
+                                                    │
+                                                    ▼
+                                               AuthService       règles : email unique (sinon 409), hash BCrypt,
+                                                    │            catégories par défaut, le tout en @Transactional
+                                                    ▼
+                                    UserRepository + CategoryService → Postgres
+                                                    │
+◀── 201 + UserResponse (JSON) ──────────────────────┘
+```
+Chaque couche a son rôle (tableau en 12.2) ; une entité ne sort jamais du service (13.1).
+
+### 14.3 Le controller REST (séance 11)
+
+```java
+@RestController                         // API qui renvoie du JSON
+@RequestMapping("/auth")                // préfixe d'URL de toute la classe
+public class AuthController {
+    private final AuthService authService;
+    public AuthController(AuthService authService) { this.authService = authService; }
+
+    @PostMapping("/register")                         // POST /auth/register
+    @ResponseStatus(HttpStatus.CREATED)               // 201 au lieu de 200
+    public UserResponse register(@Valid @RequestBody RegisterRequest request) {
+        return authService.register(request);        // il délègue, c'est tout
+    }
+}
+```
+- **Volontairement « bête »** : reçoit, délègue, renvoie. Toujours la même forme, aucune logique, aucune entité.
+- ⚠️ `@Controller` = pages HTML générées par le serveur (renvoie un nom de page) ; pour une API JSON → **`@RestController`**.
+- ⚠️ `@Controller("/auth")` : la parenthèse est le **nom du bean**, pas l'URL ! L'URL → `@RequestMapping("/auth")`.
+- **D'où viennent les données** : `@RequestBody` = le JSON du corps ; `@PathVariable` = `/transactions/{id}` ; `@RequestParam` = `?from=2026-10-01`.
+- ⚠️ **`@Valid`** déclenche les `@NotBlank`, `@Size`… du DTO. **Oublié = aucune validation, et rien ne plante** : bug de sécurité invisible.
+- **Messages de validation** : par défaut, ceux de Hibernate Validator (« la taille doit être comprise entre 12 et 72 »), dont la **langue** dépend de la config du serveur / navigateur → écrire les siens : `@Size(min = 12, max = 72, message = "Le mot de passe doit faire entre 12 et 72 caractères")`. Un bon message dit **quoi corriger**.
+- Tester à la main :
+  `curl -i -X POST localhost:8080/auth/register -H "Content-Type: application/json" -d '{"email":"a@b.fr","password":"unmotdepasselong","displayName":"A"}'` (`-i` affiche le code HTTP et les en-têtes).
+
+### 14.4 Les codes HTTP (séance 11)
+
+**4xx = la faute du client, 5xx = la faute du serveur.**
+
+| Code | Sens | Dans le projet |
+|---|---|---|
+| 200 OK | réussi | une lecture |
+| 201 Created | créé | inscription, création d'un compte |
+| 400 Bad Request | requête mal formée | `@Valid` refuse (champ vide, trop court) |
+| 401 Unauthorized | pas connecté (token absent ou invalide) | Auth 2/2 |
+| 404 Not Found | introuvable… ou pas à toi | anti-IDOR : on ne dit pas « ça existe mais ce n'est pas à toi » |
+| 409 Conflict | bien formée, mais en conflit avec l'état de la base | email déjà utilisé |
+| 500 Internal Server Error | le serveur a planté | une exception que personne n'attrape |
+
+Une 500 pour une erreur prévisible est **fausse et trompeuse** : en entreprise elle déclenche des alertes (quelqu'un est réveillé pour rien).
+
+### 14.5 Les erreurs : `@RestControllerAdvice` + `ProblemDetail` (séance 11)
+
+**Pourquoi la 500 au départ** : `EmailDejaUtiliseException` remonte service → controller → Spring sans être attrapée. Spring connaît quelques exceptions (`MethodArgumentNotValidException`, lancée par `@Valid` → 400), pas la mienne → 500.
+
+**Pourquoi pas un try/catch dans chaque controller** :
+1. **duplication** : la même 404 viendra des comptes, transactions, catégories, budgets → le même `catch` copié une vingtaine de fois, un oubli = une 500 ;
+2. **cohérence** : un seul endroit = le même format d'erreur partout, le front les lit toutes pareil ;
+3. **lisibilité** : le controller reste à 3 lignes.
+→ Le try/catch dans un controller ne se justifie que si la réaction est propre à cet endpoint (rare).
+
+**La solution** : une classe, dans un package **transversal** (`common/`), qui s'applique à **tous** les controllers.
+```java
+@RestControllerAdvice
+public class GestionErreurs {
+
+    @ExceptionHandler(EmailDejaUtiliseException.class)          // « quand elle remonte, appelle-moi »
+    public ProblemDetail emailDejaUtilise(EmailDejaUtiliseException e) {
+        ProblemDetail probleme = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, e.getMessage());
+        probleme.setTitle("Email déjà utilisé");
+        return probleme;                                         // devient la réponse (application/problem+json)
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)    // @Valid a refusé
+    public ProblemDetail validation(MethodArgumentNotValidException e) {
+        ProblemDetail probleme = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Certains champs sont invalides");
+        probleme.setTitle("Requête invalide");
+        Map<String, String> erreurs = new HashMap<>();                       // champ → message
+        for (FieldError erreur : e.getBindingResult().getFieldErrors()) {   // les champs qui ont échoué
+            erreurs.put(erreur.getField(), erreur.getDefaultMessage());
+        }
+        probleme.setProperty("erreurs", erreurs);                            // champ ajouté au JSON
+        return probleme;
+    }
+}
+```
+Réponse obtenue :
+```json
+{"title":"Requête invalide","status":400,"detail":"Certains champs sont invalides","instance":"/auth/register",
+ "erreurs":{"password":"Le mot de passe doit faire entre 12 et 72 caractères"}}
+```
+- **`ProblemDetail`** = le format standard des erreurs d'API (RFC 9457) : `type`, `title`, `status`, `detail`, `instance`, + ses propres champs (`setProperty`).
+- **L'exception reste dans son domaine** (`auth/EmailDejaUtiliseException`) : le domaine dit **ce qui s'est passé** ; la traduction en HTTP est **transversale** (`common/`). Le service ne parle jamais HTTP.
+
+### 14.6 `@Transactional` : tout ou rien (séance 11)
+
+- À l'inscription : `save(user)` puis `saveAll(catégories)`. Si les catégories plantent **sans** transaction : le user reste en base, le front reçoit une 500, l'utilisateur réessaie… et reçoit **409 « email déjà utilisé »** alors qu'il croit ne pas avoir de compte. Le problème = l'**incohérence** entre ce qu'on lui dit et ce qui est en base.
+- `@Transactional` sur `register` → les écritures dans **une seule transaction** ; une `RuntimeException` n'importe où → Postgres annule tout (**rollback**). C'est le **A d'ACID** (atomicité). Même principe que les migrations Flyway (§4).
+- Import : `org.springframework.transaction.annotation.Transactional` (Spring, plus d'options : `readOnly = true`…), pas celui de `jakarta`.
+- Par défaut, rollback **seulement sur les `RuntimeException`** → c'est pour ça que les exceptions métier en héritent (7.3).
+- Ordre : `save(user)` **avant** les catégories (FK `categories.user_id` → `users.id`).

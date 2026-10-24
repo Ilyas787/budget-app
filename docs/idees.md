@@ -10,3 +10,4 @@
 - Le test `contextLoads` (`BudgetApplicationTests`) se connecte à la base du docker compose : en CI (décembre) il échouera sans base → le passer sur Testcontainers comme `AccountRepositoryTest` (séance 8).
 - Spring Modulith : vérifie dans les tests que les packages par fonctionnalité respectent leurs frontières (pas de cycle, pas d'accès aux classes internes d'un autre package). À regarder une fois le back fini (séance 9).
 - Barre de recherche des transactions par libellé (`label`), recherche partielle et insensible à la casse : `findAllByUserIdAndLabelContainingIgnoreCase`, ou un critère texte dans les filtres de la séance 9 (séance 9 du 20/10).
+- Test d'intégration de l'inscription (`@SpringBootTest` + MockMvc + Testcontainers) : 201, 400 avec les champs fautifs, 409 sur un email en double (même avec des majuscules), 8 catégories créées. Bon candidat quand on fera les tests des endpoints (séance 11 du 24/10).
