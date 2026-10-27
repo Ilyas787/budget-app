@@ -32,4 +32,13 @@ public class AuthService {
         return new UserResponse(user.getId(), user.getEmail(), user.getDisplayName());
     }
 
+    public User authentifier(LoginRequest request) {
+        User user = userRepository.findByEmail(User.normaliserEmail(request.email()))
+                .orElseThrow(() -> new IdentifiantsInvalidesException());
+        if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            throw new IdentifiantsInvalidesException();
+        }
+        return user;
+    }
+
 }
