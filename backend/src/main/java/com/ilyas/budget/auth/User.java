@@ -26,7 +26,7 @@ public class User {
     }
 
     public User(String email, String passwordHash, String displayName) {
-        this.email = email.trim().toLowerCase(Locale.ROOT);
+        this.email = normaliserEmail(email);
         this.passwordHash = passwordHash;
         this.displayName = displayName;
     }
@@ -49,5 +49,9 @@ public class User {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public static String normaliserEmail(String email) {
+        return email.trim().toLowerCase(Locale.ROOT);
     }
 }
