@@ -38,7 +38,7 @@ public class GestionErreurs {
     @ExceptionHandler(IdentifiantsInvalidesException.class)
     public ProblemDetail identifiantsInvalides(IdentifiantsInvalidesException e) {
         ProblemDetail probleme = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, e.getMessage());
-        probleme.setTitle("Email ou mot de passe incorrect !");
+        probleme.setTitle("Identifiants invalides");
         return probleme;
     }
 }

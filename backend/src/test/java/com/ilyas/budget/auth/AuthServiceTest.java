@@ -8,6 +8,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
 
 import java.util.Optional;
 
@@ -25,12 +26,15 @@ class AuthServiceTest {
     @Mock
     private CategoryService categoryService;
 
+    @Mock
+    private JwtEncoder jwtEncoder;
+
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
     private AuthService authService;
 
     @BeforeEach
     void setUp() {
-        authService = new AuthService(userRepository, passwordEncoder, categoryService);
+        authService = new AuthService(userRepository, passwordEncoder, categoryService, jwtEncoder);
     }
 
     @Test
