@@ -501,6 +501,43 @@ class AccountRepositoryTest {
 - Lancer : triangle vert dans IntelliJ, ou `./mvnw test` dans `backend/`. Premier lancement plus long (démarrage du conteneur) ; Docker doit tourner.
 - Noms de variables qui disent ce que teste le test : `vuParA` / `vuParB` plutôt que `accountAtest`.
 
+### 6.5 Les tests unitaires avec Mockito (séance 13)
+
+| | Test d'intégration (`AccountRepositoryTest`) | Test unitaire (`AuthServiceTest`) |
+|---|---|---|
+| Teste | plusieurs pièces ensemble (repo + Hibernate + vrai Postgres) | **une seule classe**, isolée |
+| Base | une vraie, dans Docker | **aucune** : un faux (mock) |
+| Vitesse | quelques secondes | quelques millisecondes |
+
+```java
+@ExtendWith(MockitoExtension.class)            // Mockito crée les @Mock, pas de Spring
+class AuthServiceTest {
+    @Mock private UserRepository userRepository;           // FAUX repo
+    @Mock private CategoryService categoryService;
+    @Mock private JwtEncoder jwtEncoder;
+    private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();   // VRAI BCrypt
+    private AuthService authService;
+
+    @BeforeEach                                            // avant CHAQUE test : un service neuf
+    void setUp() { authService = new AuthService(userRepository, passwordEncoder, categoryService, jwtEncoder); }
+
+    @Test
+    void connexion_refusee_avec_un_mauvais_password() {
+        User user = new User("ilyas@test.com", passwordEncoder.encode("unmotdepasselong"), "Ilyas");
+        when(userRepository.findByEmail("ilyas@test.com")).thenReturn(Optional.of(user));   // « quand on t'appelle avec…, renvoie… »
+
+        assertThatThrownBy(() -> authService.authentifier(new LoginRequest("Ilyas@Test.com", "unmotdepasselon")))
+                .isInstanceOf(IdentifiantsInvalidesException.class);
+    }
+}
+```
+- **Mock** = faux objet dont on décide les réponses (`when(...).thenReturn(...)`). On ne mocke que ce qui est **lent ou extérieur** (la base) ; ce qu'on teste vraiment (BCrypt) reste réel.
+- Imports static : `Assertions.assertThat`, `Assertions.assertThatThrownBy` (AssertJ), `Mockito.when`. `isInstanceOf` = une méthode, pas d'import.
+- **Tester une exception** : le *when* et le *then* fusionnent. L'appel va **dans** la lambda de `assertThatThrownBy` (sinon l'exception part avant, le test échoue). Pas de variable `resultat` : l'appel échoue.
+- **Un test par chemin** : bon mot de passe / email inconnu / mauvais mot de passe. Expérience : sans le `!`, les tests 1 et 3 échouent, le 2 passe quand même (il s'arrête avant `matches`) → un seul test ne suffit pas.
+- Tester le cas **le plus proche** du bon (`unmotdepasselon`, une lettre en moins) et envoyer `Ilyas@Test.com` vérifie aussi la normalisation.
+- Erreur « méthode introuvable » qui ressemble à un import manquant : souvent une **parenthèse mal fermée**.
+
 ---
 
 ## 7. Java : les bases utiles au projet
@@ -1059,3 +1096,49 @@ public User authentifier(LoginRequest request) {
 - **`matches(clair, hash)`**, jamais deux hash comparés : le sel rend chaque hash différent.
 - **Pas de `@Size` au login**, juste `@NotBlank` : on **vérifie** un mot de passe existant, on n'en crée pas ; si la règle de création change (14 min), les anciens comptes doivent toujours pouvoir se connecter.
 - 🔴 **La boulette** : `if (matches(...))` au lieu de `if (!matches(...))` → le bon mot de passe refusé, n'importe quel autre accepté. Ça compile, ça démarre, rien ne plante → c'est pour ça qu'on **teste** (bon mot de passe → OK, mauvais → exception, email inconnu → exception).
+
+### 15.9 La clé secrète (séance 13)
+
+- Générer : `openssl rand -base64 32` (32 octets aléatoires) → `.env` : `JWT_SECRET=...` ; `.env.example` (commité) : `JWT_SECRET=a-generer-avec-openssl-rand-base64-32`.
+- Faire lire le `.env` à Spring (`application.properties`) :
+  ```properties
+  spring.config.import=optional:file:../.env[.properties]   # ../ : l'appli tourne depuis backend/ ; [.properties] : même format CLE=valeur
+  app.jwt.secret=${JWT_SECRET}                              # SANS valeur par défaut
+  ```
+- **Pas de valeur par défaut** : elle serait dans un fichier commité sur un repo **public** → n'importe qui fabriquerait un jeton à ton nom. Et si on oublie la variable sur le serveur, l'appli **refuse de démarrer** au lieu de tourner avec une clé connue → **fail fast**.
+- Vérifier avant chaque commit : `.env` ne doit **jamais** apparaître dans `git status`.
+
+### 15.10 Fabriquer et vérifier le jeton (séance 13)
+
+Dépendance : `spring-boot-starter-security-oauth2-resource-server` (« resource server » = une API qui accepte des jetons). **On ne code jamais sa propre crypto.**
+```java
+@Configuration
+public class JwtConfig {                                       // common/
+    @Bean public SecretKey jwtKey(@Value("${app.jwt.secret}") String secret) {
+        return new SecretKeySpec(Base64.getDecoder().decode(secret), "HmacSHA256");
+    }
+    @Bean public JwtEncoder jwtEncoder(SecretKey jwtKey) {   // FABRIQUE + signe
+        return new NimbusJwtEncoder(new ImmutableSecret<>(jwtKey));
+    }
+    @Bean public JwtDecoder jwtDecoder(SecretKey jwtKey) {   // VÉRIFIE signature + expiration
+        return NimbusJwtDecoder.withSecretKey(jwtKey).macAlgorithm(MacAlgorithm.HS256).build();
+    }
+}
+```
+- HMAC (HS256) : la **même clé** signe et vérifie (seul le serveur fait les deux).
+
+```java
+public TokenResponse login(LoginRequest request) {
+    User user = authentifier(request);                                  // 401 si faux (déjà testé)
+    Instant maintenant = Instant.now();
+    JwtClaimsSet claims = JwtClaimsSet.builder()                        // builder : construire champ par champ
+            .issuer("budget-app").subject(user.getId().toString())
+            .issuedAt(maintenant).expiresAt(maintenant.plus(1, ChronoUnit.HOURS)).build();
+    JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();      // obligatoire en HS256
+    return new TokenResponse(jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue());
+}
+```
+- `POST /auth/login` → **200** (pas 201 : on ne crée rien) + `{"token":"eyJ..."}`.
+- **Pourquoi renvoyer un jeton** (le bracelet du festival) : on montre sa pièce d'identité **une fois**, puis le bracelet à chaque entrée. Renvoyer le mot de passe à chaque requête (« Basic ») = mot de passe exposé des centaines de fois, BCrypt (~100 ms) à chaque requête, et un mot de passe volé n'expire pas.
+- Côté front : Angular garde le jeton et un **intercepteur** l'ajoute à chaque requête (`Authorization: Bearer ...`).
+- Décodé (Base64) : `{"iss":"budget-app","sub":"dc8e2abb-…","iat":1793202983,"exp":1793206583}` → exp − iat = 3600 s = 1 h.
