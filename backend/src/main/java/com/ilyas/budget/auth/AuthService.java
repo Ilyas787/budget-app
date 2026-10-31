@@ -12,6 +12,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 @Service
 public class AuthService {
@@ -65,6 +66,12 @@ public class AuthService {
         JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
         String token = jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue();
         return new TokenResponse(token);
+    }
+
+    public UserResponse me(UUID userId) {
+        return userRepository.findById(userId)
+                .map(user -> new UserResponse(user.getId(), user.getEmail(), user.getDisplayName()))
+                .orElseThrow(() -> new IdentifiantsInvalidesException());
     }
 
 }
