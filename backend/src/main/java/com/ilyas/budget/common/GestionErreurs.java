@@ -1,6 +1,7 @@
 package com.ilyas.budget.common;
 
 import com.ilyas.budget.auth.EmailDejaUtiliseException;
+import com.ilyas.budget.auth.IdentifiantsInvalidesException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.validation.FieldError;
@@ -31,6 +32,13 @@ public class GestionErreurs {
             erreurs.put(erreur.getField(), erreur.getDefaultMessage());
         }
         probleme.setProperty("erreurs", erreurs);
+        return probleme;
+    }
+
+    @ExceptionHandler(IdentifiantsInvalidesException.class)
+    public ProblemDetail identifiantsInvalides(IdentifiantsInvalidesException e) {
+        ProblemDetail probleme = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, e.getMessage());
+        probleme.setTitle("Identifiants invalides");
         return probleme;
     }
 }

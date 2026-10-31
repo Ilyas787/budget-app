@@ -21,6 +21,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 12. [Architecture du code : packages et couches](#12-architecture-du-code--packages-et-couches)
 13. [Sécurité de l'API : DTO, injections, mots de passe](#13-sécurité-de-lapi--dto-injections-mots-de-passe)
 14. [Spring : beans, API REST, erreurs, transactions](#14-spring--beans-api-rest-erreurs-transactions)
+15. [Authentification : session, JWT, Spring Security](#15-authentification--session-jwt-spring-security)
 
 ---
 
@@ -47,6 +48,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | `@Valid` | « Sans `@Valid`, les annotations du DTO ne sont jamais vérifiées et rien ne plante : c'est la première chose que je regarde sur un endpoint. » | 14.3 |
 | Gestion des erreurs | « Les exceptions métier sont traduites en HTTP à un seul endroit, un `@RestControllerAdvice` qui renvoie du `ProblemDetail` : un format uniforme pour le front, pas de try/catch dupliqués. » | 14.5 |
 | `@Transactional` | « Une action métier qui écrit plusieurs fois est dans une transaction : tout ou rien. Sinon l'utilisateur reçoit une erreur alors que la moitié est en base. » | 14.6 |
+| JWT | « Le JWT est signé, pas chiffré : on peut le lire mais pas le modifier sans la clé. Le serveur ne stocke rien, il vérifie signature et expiration à chaque requête, et l'id de l'utilisateur vient toujours du jeton, jamais de la requête. » | 15 |
 | Dans le doute | « Je choisis l'option qu'on peut assouplir plus tard : une erreur se corrige, des données effacées sont perdues. » | 2.5 |
 
 ---
@@ -499,6 +501,43 @@ class AccountRepositoryTest {
 - Lancer : triangle vert dans IntelliJ, ou `./mvnw test` dans `backend/`. Premier lancement plus long (démarrage du conteneur) ; Docker doit tourner.
 - Noms de variables qui disent ce que teste le test : `vuParA` / `vuParB` plutôt que `accountAtest`.
 
+### 6.5 Les tests unitaires avec Mockito (séance 13)
+
+| | Test d'intégration (`AccountRepositoryTest`) | Test unitaire (`AuthServiceTest`) |
+|---|---|---|
+| Teste | plusieurs pièces ensemble (repo + Hibernate + vrai Postgres) | **une seule classe**, isolée |
+| Base | une vraie, dans Docker | **aucune** : un faux (mock) |
+| Vitesse | quelques secondes | quelques millisecondes |
+
+```java
+@ExtendWith(MockitoExtension.class)            // Mockito crée les @Mock, pas de Spring
+class AuthServiceTest {
+    @Mock private UserRepository userRepository;           // FAUX repo
+    @Mock private CategoryService categoryService;
+    @Mock private JwtEncoder jwtEncoder;
+    private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();   // VRAI BCrypt
+    private AuthService authService;
+
+    @BeforeEach                                            // avant CHAQUE test : un service neuf
+    void setUp() { authService = new AuthService(userRepository, passwordEncoder, categoryService, jwtEncoder); }
+
+    @Test
+    void connexion_refusee_avec_un_mauvais_password() {
+        User user = new User("ilyas@test.com", passwordEncoder.encode("unmotdepasselong"), "Ilyas");
+        when(userRepository.findByEmail("ilyas@test.com")).thenReturn(Optional.of(user));   // « quand on t'appelle avec…, renvoie… »
+
+        assertThatThrownBy(() -> authService.authentifier(new LoginRequest("Ilyas@Test.com", "unmotdepasselon")))
+                .isInstanceOf(IdentifiantsInvalidesException.class);
+    }
+}
+```
+- **Mock** = faux objet dont on décide les réponses (`when(...).thenReturn(...)`). On ne mocke que ce qui est **lent ou extérieur** (la base) ; ce qu'on teste vraiment (BCrypt) reste réel.
+- Imports static : `Assertions.assertThat`, `Assertions.assertThatThrownBy` (AssertJ), `Mockito.when`. `isInstanceOf` = une méthode, pas d'import.
+- **Tester une exception** : le *when* et le *then* fusionnent. L'appel va **dans** la lambda de `assertThatThrownBy` (sinon l'exception part avant, le test échoue). Pas de variable `resultat` : l'appel échoue.
+- **Un test par chemin** : bon mot de passe / email inconnu / mauvais mot de passe. Expérience : sans le `!`, les tests 1 et 3 échouent, le 2 passe quand même (il s'arrête avant `matches`) → un seul test ne suffit pas.
+- Tester le cas **le plus proche** du bon (`unmotdepasselon`, une lettre en moins) et envoyer `Ilyas@Test.com` vérifie aussi la normalisation.
+- Erreur « méthode introuvable » qui ressemble à un import manquant : souvent une **parenthèse mal fermée**.
+
 ---
 
 ## 7. Java : les bases utiles au projet
@@ -940,3 +979,166 @@ Réponse obtenue :
 - Import : `org.springframework.transaction.annotation.Transactional` (Spring, plus d'options : `readOnly = true`…), pas celui de `jakarta`.
 - Par défaut, rollback **seulement sur les `RuntimeException`** → c'est pour ça que les exceptions métier en héritent (7.3).
 - Ordre : `save(user)` **avant** les catégories (FK `categories.user_id` → `users.id`).
+
+---
+
+## 15. Authentification : session, JWT, Spring Security
+
+(séance 12)
+
+### 15.1 Le problème
+
+**HTTP n'a pas de mémoire** : chaque requête arrive seule, le serveur ne sait pas qu'elle vient de la même personne que la précédente.
+→ Après le login, le serveur donne au navigateur un **« code »** que celui-ci renvoie à **chaque** requête.
+
+### 15.2 Deux façons de faire
+
+| | Session | JWT |
+|---|---|---|
+| Le code | un numéro aléatoire (`a8f3…`) | un jeton qui **contient** l'info (`userId`, expiration) |
+| Le serveur stocke | oui : une table `a8f3… → Ilyas` | **rien** : il vérifie la signature et lit le jeton |
+| Plusieurs serveurs (AWS) | doivent partager la table | chacun vérifie seul |
+| Déconnexion / révocation | le serveur supprime la ligne → immédiat | le front jette le jeton ; le serveur ne peut pas l'annuler avant expiration → durée courte |
+
+Choix du projet : **JWT** (duo classique SPA Angular + API, sans état côté serveur, adapté à AWS). Les sessions restent un très bon choix pour beaucoup d'applis : ce n'est pas « JWT = moderne ».
+
+### 15.3 Le parcours complet
+
+```
+1. Inscription   POST /auth/register {email, password}      → 201 (rien à voir avec le JWT)
+
+2. Login         POST /auth/login {email, password}
+                 serveur : findByEmail → passwordEncoder.matches(clair, hash) ?
+                   non → 401
+                   oui → fabrique un JWT { sub: userId, exp: dans 1 h } + le SIGNE avec la clé secrète
+                 ◀── 200 { "token": "eyJ..." }
+
+3. Le front garde le jeton (en mémoire / localStorage).
+
+4. Chaque requête suivante
+                 GET /accounts
+                 en-tête : Authorization: Bearer eyJ...
+                 serveur, AVANT le controller (filtre Spring Security) :
+                   signature valide ? pas expiré ?   non → 401
+                   oui → lit le userId → le range dans le « contexte de sécurité » de la requête
+                 controller → service : accountRepository.findAllByUserId(userId du jeton)
+                 ◀── 200 [ ...mes comptes... ]
+
+5. Déconnexion   le front supprime le jeton (le serveur n'a rien à faire).
+6. Jeton expiré  → 401 → le front renvoie vers la page de login.
+```
+
+### 15.4 Ce qu'il y a dans un JWT
+
+Trois morceaux séparés par des points : `en-tête.contenu.signature`.
+```json
+en-tête  : { "alg": "HS256" }                         ← l'algo de signature
+contenu  : { "sub": "5b79efd9-…",                     ← le sujet = le userId
+             "iat": 1761580800,                        ← émis le (secondes depuis 1970)
+             "exp": 1761584400 }                       ← expire le (ici 1 h après)
+signature: HMAC-SHA256(en-tête + "." + contenu, CLÉ SECRÈTE)
+```
+- Les champs du contenu = les **claims** (`sub`, `iat`, `exp`, `iss` = l'émetteur…).
+- En-tête et contenu sont **encodés en Base64, pas chiffrés** : n'importe qui peut les lire (jwt.io). → **Jamais de secret dans un JWT** (pas de mot de passe, pas de donnée sensible).
+
+### 15.5 La signature : pourquoi on ne peut pas tricher
+
+- C'est un **sceau** : seul le serveur possède le tampon (la clé secrète).
+- Le client change `sub` pour l'id d'un autre → il ne peut pas recalculer la signature sans la clé → le serveur recalcule, ça ne correspond pas → **401**.
+- **Signé ≠ chiffré** : signé = on peut lire mais pas modifier ; chiffré = on ne peut même pas lire.
+- **La clé secrète est le trésor de l'appli** : si elle fuit, n'importe qui fabrique un jeton au nom de n'importe qui. → dans le `.env`, jamais dans le code, longue (≥ 32 octets pour HS256).
+
+### 15.6 Ce que ça change dans le code
+
+- **Le `userId` vient du jeton, jamais de la requête** (ni du JSON, ni de l'URL). C'est lui qu'on passe à tous les `findByIdAndUserId(id, userId)` → c'est ce qui rend l'anti-IDOR réel.
+- Spring Security place une **chaîne de filtres** devant les controllers : la requête traverse les filtres (« jeton valide ? ») avant d'atteindre le controller. La config décide quelles routes sont **ouvertes** (`/auth/register`, `/auth/login`) et lesquelles sont **protégées** (tout le reste → 401 sans jeton).
+- Phrase d'entretien : « Le JWT est signé, pas chiffré : on peut le lire mais pas le modifier sans la clé. Le serveur ne stocke rien, il vérifie la signature et l'expiration à chaque requête, et l'id de l'utilisateur vient toujours du jeton, jamais de la requête. »
+
+### 15.7 La config Spring Security (séance 12)
+
+**Sans config** (juste le starter) : tout est protégé (même l'inscription → 401), session par défaut (`Set-Cookie: JSESSIONID`), authentification « Basic » (`WWW-Authenticate: Basic`), un user `user` avec un mot de passe généré dans les logs. En cadeau : des en-têtes de sécurité (`X-Frame-Options: DENY`, `nosniff`, `Cache-Control: no-store`).
+
+```java
+@Configuration
+public class SecurityConfig {                                   // dans common/ (transversal)
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .csrf(csrf -> csrf.disable())                                       // ①
+            .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))   // ②
+            .authorizeHttpRequests(auth -> auth                                 // ③
+                .requestMatchers("/auth/register", "/auth/login", "/error").permitAll()
+                .anyRequest().authenticated())
+            .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)));  // ④
+        return http.build();
+    }
+}
+```
+1. **CSRF désactivé** : l'attaque profite des **cookies envoyés automatiquement** par le navigateur. Notre JWT voyage dans l'en-tête `Authorization`, jamais envoyé tout seul → l'attaque ne s'applique pas. ⚠️ Seulement parce qu'on n'utilise pas de cookie.
+2. **`STATELESS`** : pas de session, plus de `JSESSIONID` (vérifié au curl).
+3. **Les portes** : inscription, login ouverts ; tout le reste → authentifié. `/error` ouvert, sinon une vraie 500 serait masquée par une 401 (Spring redirige les erreurs vers `/error`).
+4. Non authentifié → **401** simple (sans `WWW-Authenticate: Basic`).
+- Dépendance : `spring-boot-starter-security` (contient `spring-security-crypto`, donc BCrypt ; `PasswordConfig` reste).
+
+### 15.8 Le login (séance 12)
+
+```java
+public User authentifier(LoginRequest request) {
+    User user = userRepository.findByEmail(User.normaliserEmail(request.email()))
+            .orElseThrow(IdentifiantsInvalidesException::new);        // vide → exception (= () -> new ...())
+    if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+        throw new IdentifiantsInvalidesException();
+    }
+    return user;
+}
+```
+- **Même message (« Email ou mot de passe incorrect ») et même 401 dans les deux cas** : sinon **énumération d'utilisateurs** (un attaquant teste une liste d'emails et apprend lesquels ont un compte). Compromis : `/auth/register` le révèle déjà (409) → idees.md.
+- **`matches(clair, hash)`**, jamais deux hash comparés : le sel rend chaque hash différent.
+- **Pas de `@Size` au login**, juste `@NotBlank` : on **vérifie** un mot de passe existant, on n'en crée pas ; si la règle de création change (14 min), les anciens comptes doivent toujours pouvoir se connecter.
+- 🔴 **La boulette** : `if (matches(...))` au lieu de `if (!matches(...))` → le bon mot de passe refusé, n'importe quel autre accepté. Ça compile, ça démarre, rien ne plante → c'est pour ça qu'on **teste** (bon mot de passe → OK, mauvais → exception, email inconnu → exception).
+
+### 15.9 La clé secrète (séance 13)
+
+- Générer : `openssl rand -base64 32` (32 octets aléatoires) → `.env` : `JWT_SECRET=...` ; `.env.example` (commité) : `JWT_SECRET=a-generer-avec-openssl-rand-base64-32`.
+- Faire lire le `.env` à Spring (`application.properties`) :
+  ```properties
+  spring.config.import=optional:file:../.env[.properties]   # ../ : l'appli tourne depuis backend/ ; [.properties] : même format CLE=valeur
+  app.jwt.secret=${JWT_SECRET}                              # SANS valeur par défaut
+  ```
+- **Pas de valeur par défaut** : elle serait dans un fichier commité sur un repo **public** → n'importe qui fabriquerait un jeton à ton nom. Et si on oublie la variable sur le serveur, l'appli **refuse de démarrer** au lieu de tourner avec une clé connue → **fail fast**.
+- Vérifier avant chaque commit : `.env` ne doit **jamais** apparaître dans `git status`.
+
+### 15.10 Fabriquer et vérifier le jeton (séance 13)
+
+Dépendance : `spring-boot-starter-security-oauth2-resource-server` (« resource server » = une API qui accepte des jetons). **On ne code jamais sa propre crypto.**
+```java
+@Configuration
+public class JwtConfig {                                       // common/
+    @Bean public SecretKey jwtKey(@Value("${app.jwt.secret}") String secret) {
+        return new SecretKeySpec(Base64.getDecoder().decode(secret), "HmacSHA256");
+    }
+    @Bean public JwtEncoder jwtEncoder(SecretKey jwtKey) {   // FABRIQUE + signe
+        return new NimbusJwtEncoder(new ImmutableSecret<>(jwtKey));
+    }
+    @Bean public JwtDecoder jwtDecoder(SecretKey jwtKey) {   // VÉRIFIE signature + expiration
+        return NimbusJwtDecoder.withSecretKey(jwtKey).macAlgorithm(MacAlgorithm.HS256).build();
+    }
+}
+```
+- HMAC (HS256) : la **même clé** signe et vérifie (seul le serveur fait les deux).
+
+```java
+public TokenResponse login(LoginRequest request) {
+    User user = authentifier(request);                                  // 401 si faux (déjà testé)
+    Instant maintenant = Instant.now();
+    JwtClaimsSet claims = JwtClaimsSet.builder()                        // builder : construire champ par champ
+            .issuer("budget-app").subject(user.getId().toString())
+            .issuedAt(maintenant).expiresAt(maintenant.plus(1, ChronoUnit.HOURS)).build();
+    JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();      // obligatoire en HS256
+    return new TokenResponse(jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).getTokenValue());
+}
+```
+- `POST /auth/login` → **200** (pas 201 : on ne crée rien) + `{"token":"eyJ..."}`.
+- **Pourquoi renvoyer un jeton** (le bracelet du festival) : on montre sa pièce d'identité **une fois**, puis le bracelet à chaque entrée. Renvoyer le mot de passe à chaque requête (« Basic ») = mot de passe exposé des centaines de fois, BCrypt (~100 ms) à chaque requête, et un mot de passe volé n'expire pas.
+- Côté front : Angular garde le jeton et un **intercepteur** l'ajoute à chaque requête (`Authorization: Bearer ...`).
+- Décodé (Base64) : `{"iss":"budget-app","sub":"dc8e2abb-…","iat":1793202983,"exp":1793206583}` → exp − iat = 3600 s = 1 h.
