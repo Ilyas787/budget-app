@@ -14,3 +14,4 @@
 - Refresh token : un JWT d'accès court (15 min) + un jeton de rafraîchissement plus long, stocké côté serveur, qu'on peut révoquer (déconnexion de tous les appareils, jeton volé). À voir après la V1 (séance 12).
 - Énumération d'utilisateurs : le login renvoie le même message pour « email inconnu » et « mauvais mot de passe », mais `/auth/register` révèle qu'un email existe (409). Solution des grosses applis : email de confirmation à l'inscription (« si ce compte n'existe pas, vous recevrez un email »). Accepté en V1 (séance 12).
 - CI (décembre) : l'appli exige `JWT_SECRET` (pas de valeur par défaut, fail fast) → en CI, le fournir via un secret GitHub ou une propriété de test, sinon `contextLoads` échouera (séance 13).
+- `UUID.fromString(jwt.getSubject())` est répété dans chaque controller → plus tard, une annotation maison `@UtilisateurConnecte UUID userId` (un `HandlerMethodArgumentResolver`) pour l'écrire une seule fois (séance 14).

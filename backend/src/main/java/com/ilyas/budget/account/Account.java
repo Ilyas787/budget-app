@@ -66,5 +66,11 @@ public class Account {
     public Instant getCreatedAt() {
         return createdAt;
     }
+
+    public void modifier(String name, AccountType type, BigDecimal initialBalance) {
+        this.name = name;
+        this.type = type;
+        this.initialBalance = initialBalance != null ? initialBalance : BigDecimal.ZERO;
+    }
 }
 
