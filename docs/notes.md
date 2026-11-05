@@ -1,7 +1,7 @@
 # Notes d'apprentissage
 
 Ce que j'apprends en construisant le projet, à relire avant les entretiens.
-Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 24/10/2026 (séances 1 à 11).
+Organisé **par thème** (pas par séance) ; réorganisé chaque samedi. Dernière réorganisation : 31/10/2026 (séances 1 à 14).
 Les séances où une notion a été vue sont indiquées entre parenthèses, pour retrouver le contexte dans `journal.md`.
 
 ## Sommaire
@@ -12,7 +12,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 3. [Écrire du SQL (une migration)](#3-écrire-du-sql-une-migration)
 4. [Flyway et les migrations](#4-flyway-et-les-migrations)
 5. [psql](#5-psql)
-6. [JPA : entités, relations, repositories, tests](#6-jpa--entités-relations-repositories-tests)
+6. [JPA : entités, relations, repositories](#6-jpa--entités-relations-repositories)
 7. [Java : les bases utiles au projet](#7-java--les-bases-utiles-au-projet)
 8. [Docker et docker compose](#8-docker-et-docker-compose)
 9. [YAML](#9-yaml)
@@ -22,6 +22,8 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 13. [Sécurité de l'API : DTO, injections, mots de passe](#13-sécurité-de-lapi--dto-injections-mots-de-passe)
 14. [Spring : beans, API REST, erreurs, transactions](#14-spring--beans-api-rest-erreurs-transactions)
 15. [Authentification : session, JWT, Spring Security](#15-authentification--session-jwt-spring-security)
+16. [Les tests](#16-les-tests)
+17. [Un CRUD REST : l'exemple des comptes](#17-un-crud-rest--lexemple-des-comptes)
 
 ---
 
@@ -40,7 +42,7 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | `@Data` sur une entité | « Jamais : son `toString`/`equals`/`hashCode` parcourent les relations → requêtes en cascade, voire boucle infinie. » | 7.1 |
 | Constructeur `protected` | « Obligatoire pour JPA, qui instancie l'entité puis la remplit par réflexion. `protected` : mon code ne peut pas créer d'entité incomplète, Hibernate et ses proxies peuvent l'utiliser. » | 6.1 |
 | `Optional` | « `Optional` rend l'absence explicite : l'appelant est obligé de la gérer, au lieu d'un `null` qui finit en `NullPointerException`. » | 6.3 |
-| Test anti-IDOR | « Je teste le cas négatif ET le cas positif : un test qui ne vérifie que l'absence passerait avec une méthode qui ne renvoie jamais rien. » | 6.4 |
+| Test anti-IDOR | « Je teste le cas négatif ET le cas positif : un test qui ne vérifie que l'absence passerait avec une méthode qui ne renvoie jamais rien. » | 16.2 |
 | Schéma en entreprise | « Migrations versionnées (Flyway/Liquibase) et Hibernate en `validate` : `ddl-auto=update` n'a ni historique ni review, et ne sait pas renommer. » | 4 |
 | DTO vs entité | « Je ne bind jamais une entité JPA sur une requête : un DTO limite ce que le client peut envoyer (pas de mass assignment) et ce que je renvoie (pas de hash qui fuit), et découple l'API du schéma. » | 13.1 |
 | Injection SQL | « Je n'assemble jamais une requête en concaténant une saisie : requêtes paramétrées, que Spring Data et JPA font pour moi. La valeur est envoyée à part, elle ne peut pas devenir du SQL. » | 13.2 |
@@ -49,6 +51,8 @@ Les séances où une notion a été vue sont indiquées entre parenthèses, pour
 | Gestion des erreurs | « Les exceptions métier sont traduites en HTTP à un seul endroit, un `@RestControllerAdvice` qui renvoie du `ProblemDetail` : un format uniforme pour le front, pas de try/catch dupliqués. » | 14.5 |
 | `@Transactional` | « Une action métier qui écrit plusieurs fois est dans une transaction : tout ou rien. Sinon l'utilisateur reçoit une erreur alors que la moitié est en base. » | 14.6 |
 | JWT | « Le JWT est signé, pas chiffré : on peut le lire mais pas le modifier sans la clé. Le serveur ne stocke rien, il vérifie signature et expiration à chaque requête, et l'id de l'utilisateur vient toujours du jeton, jamais de la requête. » | 15 |
+| 404 plutôt que 403 | « Une ressource d'un autre utilisateur renvoie 404, pas 403 : un 403 confirmerait qu'elle existe. » | 17.1 |
+| Setters | « Sur une entité, je préfère une méthode métier à des setters : les règles restent au même endroit et on n'ouvre que ce qui doit être modifiable. » | 17.4 |
 | Dans le doute | « Je choisis l'option qu'on peut assouplir plus tard : une erreur se corrige, des données effacées sont perdues. » | 2.5 |
 
 ---
@@ -360,9 +364,9 @@ Console SQL dans le conteneur : `docker compose exec db psql -U budget -d budget
 
 ---
 
-## 6. JPA : entités, relations, repositories, tests
+## 6. JPA : entités, relations, repositories
 
-(séances 3, 6, 7, 8)
+(séances 3, 6, 7, 8, 14) — les tests sont en §16.
 
 ### 6.1 Une entité
 
@@ -456,87 +460,6 @@ public interface AccountRepository extends JpaRepository<Account, UUID> {   // I
 - Spring analyse tous les noms au **démarrage** : une faute → `No property 'usrId' found for type 'Account'`. Requête trop compliquée pour un nom lisible → `@Query` (dashboard).
 - **Les index ne se déclarent pas ici** : ils vivent dans la base (Flyway), et le **planificateur** de Postgres les choisit tout seul pour chaque requête.
   Ce qui compte : écrire des méthodes dont le `WHERE` correspond aux index (`findAllByUserIdOrderByDateDesc` ↔ `(user_id, date)`). Vérifiable avec `EXPLAIN`.
-
-### 6.4 Les tests de repository avec Testcontainers (séance 8)
-
-**Le principe** : un Postgres **jetable** lancé dans Docker pour le test ; Flyway y joue `V1` et `V2` → le vrai schéma ; on crée des données, on appelle le repository, on vérifie ; tout est annulé à la fin.
-
-```java
-@DataJpaTest                                                                 // seulement la partie JPA ; chaque test est rollbacké
-@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE) // garder la vraie base, pas une base en mémoire
-@Testcontainers
-class AccountRepositoryTest {
-
-    @Container                                                               // démarré avant les tests, arrêté après
-    @ServiceConnection                                                       // Spring branche la connexion tout seul
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");   // static = un seul conteneur pour la classe
-
-    @Autowired UserRepository userRepository;
-    @Autowired AccountRepository accountRepository;
-
-    @Test
-    void un_user_ne_voit_pas_le_compte_d_un_autre() {
-        // given : deux users, un compte à A — sauvegardés (sinon ils n'existent qu'en mémoire, id = null)
-        User userA = new User("usera@test.com", "password", "userA");
-        User userB = new User("userb@test.com", "password", "userB");
-        Account accountA = new Account(userA, "accountA", COURANT, BigDecimal.ZERO);
-        userRepository.save(userA);            // les users d'abord (le compte a une FK vers son user)
-        userRepository.save(userB);
-        accountRepository.save(accountA);
-        // when
-        Optional<Account> vuParA = accountRepository.findByIdAndUserId(accountA.getId(), userA.getId());
-        Optional<Account> vuParB = accountRepository.findByIdAndUserId(accountA.getId(), userB.getId());
-        // then
-        assertThat(vuParA).isPresent();        // sinon le test passerait aussi avec une méthode qui ne renvoie JAMAIS rien
-        assertThat(vuParB).isEmpty();
-    }
-}
-```
-
-- **Given / when / then** : préparer les données / appeler ce qu'on teste / vérifier.
-- Toujours tester **le cas positif ET le cas négatif** : un test qui ne vérifie que `isEmpty()` passerait avec un bug qui ne renvoie jamais rien.
-- `save` d'une **nouvelle** entité remplit l'`id` dans l'objet lui-même (on peut réutiliser `userA`). Bonne habitude plus tard : utiliser la valeur renvoyée (autre instance possible pour une entité déjà existante).
-- `assertThat` = méthode **statique** d'AssertJ : `import static org.assertj.core.api.Assertions.assertThat;` (déjà fournie par les dépendances de test de Spring Boot).
-- Les logs `Hibernate: insert ... / select ... where a1_0.id=? and a1_0.user_id=?` montrent le SQL généré : on y **voit** la traversée `user.id` → colonne `user_id`.
-- Lancer : triangle vert dans IntelliJ, ou `./mvnw test` dans `backend/`. Premier lancement plus long (démarrage du conteneur) ; Docker doit tourner.
-- Noms de variables qui disent ce que teste le test : `vuParA` / `vuParB` plutôt que `accountAtest`.
-
-### 6.5 Les tests unitaires avec Mockito (séance 13)
-
-| | Test d'intégration (`AccountRepositoryTest`) | Test unitaire (`AuthServiceTest`) |
-|---|---|---|
-| Teste | plusieurs pièces ensemble (repo + Hibernate + vrai Postgres) | **une seule classe**, isolée |
-| Base | une vraie, dans Docker | **aucune** : un faux (mock) |
-| Vitesse | quelques secondes | quelques millisecondes |
-
-```java
-@ExtendWith(MockitoExtension.class)            // Mockito crée les @Mock, pas de Spring
-class AuthServiceTest {
-    @Mock private UserRepository userRepository;           // FAUX repo
-    @Mock private CategoryService categoryService;
-    @Mock private JwtEncoder jwtEncoder;
-    private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();   // VRAI BCrypt
-    private AuthService authService;
-
-    @BeforeEach                                            // avant CHAQUE test : un service neuf
-    void setUp() { authService = new AuthService(userRepository, passwordEncoder, categoryService, jwtEncoder); }
-
-    @Test
-    void connexion_refusee_avec_un_mauvais_password() {
-        User user = new User("ilyas@test.com", passwordEncoder.encode("unmotdepasselong"), "Ilyas");
-        when(userRepository.findByEmail("ilyas@test.com")).thenReturn(Optional.of(user));   // « quand on t'appelle avec…, renvoie… »
-
-        assertThatThrownBy(() -> authService.authentifier(new LoginRequest("Ilyas@Test.com", "unmotdepasselon")))
-                .isInstanceOf(IdentifiantsInvalidesException.class);
-    }
-}
-```
-- **Mock** = faux objet dont on décide les réponses (`when(...).thenReturn(...)`). On ne mocke que ce qui est **lent ou extérieur** (la base) ; ce qu'on teste vraiment (BCrypt) reste réel.
-- Imports static : `Assertions.assertThat`, `Assertions.assertThatThrownBy` (AssertJ), `Mockito.when`. `isInstanceOf` = une méthode, pas d'import.
-- **Tester une exception** : le *when* et le *then* fusionnent. L'appel va **dans** la lambda de `assertThatThrownBy` (sinon l'exception part avant, le test échoue). Pas de variable `resultat` : l'appel échoue.
-- **Un test par chemin** : bon mot de passe / email inconnu / mauvais mot de passe. Expérience : sans le `!`, les tests 1 et 3 échouent, le 2 passe quand même (il s'arrête avant `matches`) → un seul test ne suffit pas.
-- Tester le cas **le plus proche** du bon (`unmotdepasselon`, une lettre en moins) et envoyer `Ilyas@Test.com` vérifie aussi la normalisation.
-- Erreur « méthode introuvable » qui ressemble à un import manquant : souvent une **parenthèse mal fermée**.
 
 ---
 
@@ -921,11 +844,15 @@ public class AuthController {
 |---|---|---|
 | 200 OK | réussi | une lecture |
 | 201 Created | créé | inscription, création d'un compte |
+| 204 No Content | fait, rien à renvoyer | suppression d'un compte |
 | 400 Bad Request | requête mal formée | `@Valid` refuse (champ vide, trop court) |
 | 401 Unauthorized | pas connecté (token absent ou invalide) | Auth 2/2 |
 | 404 Not Found | introuvable… ou pas à toi | anti-IDOR : on ne dit pas « ça existe mais ce n'est pas à toi » |
 | 409 Conflict | bien formée, mais en conflit avec l'état de la base | email déjà utilisé |
 | 500 Internal Server Error | le serveur a planté | une exception que personne n'attrape |
+
+- **400 ou 401 ?** (séance 14) 400 = il manque quelque chose au **contenu** attendu (un champ du JSON). 401 = la requête est complète mais on ne sait pas **qui** l'envoie (identité absente **ou** fausse). L'identité est une couche à part (l'en-tête `Authorization`), pas un champ.
+- **202 Accepted** = « reçu, je traiterai plus tard » (tâche de fond) ; **203** = rare (proxys). Pas pour nous.
 
 Une 500 pour une erreur prévisible est **fausse et trompeuse** : en entreprise elle déclenche des alertes (quelqu'un est réveillé pour rien).
 
@@ -970,6 +897,17 @@ Réponse obtenue :
  "erreurs":{"password":"Le mot de passe doit faire entre 12 et 72 caractères"}}
 ```
 - **`ProblemDetail`** = le format standard des erreurs d'API (RFC 9457) : `type`, `title`, `status`, `detail`, `instance`, + ses propres champs (`setProperty`).
+- **`title` vs `detail`** (séance 14) : `title` = la **catégorie**, courte et toujours la même, fixée dans le handler ; `detail` = **ce cas précis**, vient de `e.getMessage()`.
+
+  | Code | `title` (fixe) | `detail` (ce cas-ci) |
+  |---|---|---|
+  | 400 | Requête invalide | Certains champs sont invalides (+ `erreurs`) |
+  | 401 | Identifiants invalides | Email ou mot de passe incorrect |
+  | 404 | Ressource introuvable | Ressource introuvable / Compte introuvable |
+  | 409 | Email déjà utilisé | Email déjà utilisé : sayli@test.com |
+- **Message de l'exception vs `title`** : le message vit en **Java pur** (logs, stack trace, tests, un traitement de nuit sans HTTP) ; le `title` vit dans la **couche HTTP**, pour le front. Un peu de redondance sur les cas simples, c'est normal.
+- ⚠️ Pour une 404 anti-IDOR, le `detail` ne dit **jamais** « pas à toi ».
+- **Où ranger une exception** : là où sont ceux qui la **lancent**. `EmailDejaUtiliseException` → `auth/` (règle de l'inscription) ; `RessourceIntrouvableException` → `common/` (lancée par comptes, catégories, transactions, budgets).
 - **L'exception reste dans son domaine** (`auth/EmailDejaUtiliseException`) : le domaine dit **ce qui s'est passé** ; la traduction en HTTP est **transversale** (`common/`). Le service ne parle jamais HTTP.
 
 ### 14.6 `@Transactional` : tout ou rien (séance 11)
@@ -1142,3 +1080,198 @@ public TokenResponse login(LoginRequest request) {
 - **Pourquoi renvoyer un jeton** (le bracelet du festival) : on montre sa pièce d'identité **une fois**, puis le bracelet à chaque entrée. Renvoyer le mot de passe à chaque requête (« Basic ») = mot de passe exposé des centaines de fois, BCrypt (~100 ms) à chaque requête, et un mot de passe volé n'expire pas.
 - Côté front : Angular garde le jeton et un **intercepteur** l'ajoute à chaque requête (`Authorization: Bearer ...`).
 - Décodé (Base64) : `{"iss":"budget-app","sub":"dc8e2abb-…","iat":1793202983,"exp":1793206583}` → exp − iat = 3600 s = 1 h.
+
+### 15.11 Lire le jeton : le décodeur et `GET /auth/me` (séances 13, 14)
+
+```java
+.oauth2ResourceServer(oauth -> oauth.jwt(Customizer.withDefaults()))   // dans SecurityConfig
+```
+= « cette API accepte des JWT dans `Authorization: Bearer ...` ». Spring ajoute **le filtre** : il lit l'en-tête, vérifie avec le bean `JwtDecoder` (signature + expiration), et retient le `sub`. On n'écrit pas le filtre.
+
+```java
+@GetMapping("/me")                                           // AuthController → GET /auth/me (protégé : pas dans permitAll)
+public UserResponse me(@AuthenticationPrincipal Jwt jwt) {    // le jeton DÉJÀ vérifié par le filtre
+    return authService.me(UUID.fromString(jwt.getSubject())); // sub = userId
+}
+// AuthService
+public UserResponse me(UUID userId) {
+    return userRepository.findById(userId)
+            .map(user -> new UserResponse(user.getId(), user.getEmail(), user.getDisplayName()))   // ce qui vient de la base
+            .orElseThrow(IdentifiantsInvalidesException::new);                                     // compte supprimé entre-temps
+}
+```
+**C'est ainsi que le `userId` arrive dans tous les endpoints : du jeton, jamais de la requête.**
+
+Tester au terminal sans copier-coller le jeton :
+```
+TOKEN=$(curl -s -X POST localhost:8080/auth/login -H "Content-Type: application/json" -d '{"email":"sayli@test.com","password":"unmotdepasselong"}' | sed -E 's/.*"token":"([^"]+)".*/\1/')
+curl -i localhost:8080/auth/me                                       → 401 (pas d'identité)
+curl -i localhost:8080/auth/me -H "Authorization: Bearer $TOKEN"     → 200 + Sayli
+curl -i localhost:8080/auth/me -H "Authorization: Bearer ${TOKEN}x"  → 401 + WWW-Authenticate: ... Invalid signature
+```
+`$( ... )` = récupérer la sortie d'une commande dans une variable.
+
+---
+
+## 16. Les tests
+
+(séances 8, 13)
+
+### 16.1 Quoi tester (séances 8, 12, 13)
+
+- **Un test par chemin** du code : bon mot de passe / email inconnu / mauvais mot de passe. Un seul test ne suffit pas (sans le `!`, le test « email inconnu » passait encore).
+- Tester **le cas positif ET le cas négatif** (anti-IDOR : A voit son compte, B ne le voit pas).
+- Un bug qui **compile et ne plante pas** (`if (matches)` au lieu de `if (!matches)`) n'est attrapé que par un test.
+- Unitaire (une classe, faux objets, millisecondes) vs intégration (plusieurs pièces, vraie base, secondes) : tableau en 16.3.
+
+### 16.2 Les tests de repository avec Testcontainers (séance 8)
+
+**Le principe** : un Postgres **jetable** lancé dans Docker pour le test ; Flyway y joue `V1` et `V2` → le vrai schéma ; on crée des données, on appelle le repository, on vérifie ; tout est annulé à la fin.
+
+```java
+@DataJpaTest                                                                 // seulement la partie JPA ; chaque test est rollbacké
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE) // garder la vraie base, pas une base en mémoire
+@Testcontainers
+class AccountRepositoryTest {
+
+    @Container                                                               // démarré avant les tests, arrêté après
+    @ServiceConnection                                                       // Spring branche la connexion tout seul
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");   // static = un seul conteneur pour la classe
+
+    @Autowired UserRepository userRepository;
+    @Autowired AccountRepository accountRepository;
+
+    @Test
+    void un_user_ne_voit_pas_le_compte_d_un_autre() {
+        // given : deux users, un compte à A — sauvegardés (sinon ils n'existent qu'en mémoire, id = null)
+        User userA = new User("usera@test.com", "password", "userA");
+        User userB = new User("userb@test.com", "password", "userB");
+        Account accountA = new Account(userA, "accountA", COURANT, BigDecimal.ZERO);
+        userRepository.save(userA);            // les users d'abord (le compte a une FK vers son user)
+        userRepository.save(userB);
+        accountRepository.save(accountA);
+        // when
+        Optional<Account> vuParA = accountRepository.findByIdAndUserId(accountA.getId(), userA.getId());
+        Optional<Account> vuParB = accountRepository.findByIdAndUserId(accountA.getId(), userB.getId());
+        // then
+        assertThat(vuParA).isPresent();        // sinon le test passerait aussi avec une méthode qui ne renvoie JAMAIS rien
+        assertThat(vuParB).isEmpty();
+    }
+}
+```
+
+- **Given / when / then** : préparer les données / appeler ce qu'on teste / vérifier.
+- Toujours tester **le cas positif ET le cas négatif** : un test qui ne vérifie que `isEmpty()` passerait avec un bug qui ne renvoie jamais rien.
+- `save` d'une **nouvelle** entité remplit l'`id` dans l'objet lui-même (on peut réutiliser `userA`). Bonne habitude plus tard : utiliser la valeur renvoyée (autre instance possible pour une entité déjà existante).
+- `assertThat` = méthode **statique** d'AssertJ : `import static org.assertj.core.api.Assertions.assertThat;` (déjà fournie par les dépendances de test de Spring Boot).
+- Les logs `Hibernate: insert ... / select ... where a1_0.id=? and a1_0.user_id=?` montrent le SQL généré : on y **voit** la traversée `user.id` → colonne `user_id`.
+- Lancer : triangle vert dans IntelliJ, ou `./mvnw test` dans `backend/`. Premier lancement plus long (démarrage du conteneur) ; Docker doit tourner.
+- Noms de variables qui disent ce que teste le test : `vuParA` / `vuParB` plutôt que `accountAtest`.
+
+### 16.3 Les tests unitaires avec Mockito (séance 13)
+
+| | Test d'intégration (`AccountRepositoryTest`) | Test unitaire (`AuthServiceTest`) |
+|---|---|---|
+| Teste | plusieurs pièces ensemble (repo + Hibernate + vrai Postgres) | **une seule classe**, isolée |
+| Base | une vraie, dans Docker | **aucune** : un faux (mock) |
+| Vitesse | quelques secondes | quelques millisecondes |
+
+```java
+@ExtendWith(MockitoExtension.class)            // Mockito crée les @Mock, pas de Spring
+class AuthServiceTest {
+    @Mock private UserRepository userRepository;           // FAUX repo
+    @Mock private CategoryService categoryService;
+    @Mock private JwtEncoder jwtEncoder;
+    private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();   // VRAI BCrypt
+    private AuthService authService;
+
+    @BeforeEach                                            // avant CHAQUE test : un service neuf
+    void setUp() { authService = new AuthService(userRepository, passwordEncoder, categoryService, jwtEncoder); }
+
+    @Test
+    void connexion_refusee_avec_un_mauvais_password() {
+        User user = new User("ilyas@test.com", passwordEncoder.encode("unmotdepasselong"), "Ilyas");
+        when(userRepository.findByEmail("ilyas@test.com")).thenReturn(Optional.of(user));   // « quand on t'appelle avec…, renvoie… »
+
+        assertThatThrownBy(() -> authService.authentifier(new LoginRequest("Ilyas@Test.com", "unmotdepasselon")))
+                .isInstanceOf(IdentifiantsInvalidesException.class);
+    }
+}
+```
+- **Mock** = faux objet dont on décide les réponses (`when(...).thenReturn(...)`). On ne mocke que ce qui est **lent ou extérieur** (la base) ; ce qu'on teste vraiment (BCrypt) reste réel.
+- Imports static : `Assertions.assertThat`, `Assertions.assertThatThrownBy` (AssertJ), `Mockito.when`. `isInstanceOf` = une méthode, pas d'import.
+- **Tester une exception** : le *when* et le *then* fusionnent. L'appel va **dans** la lambda de `assertThatThrownBy` (sinon l'exception part avant, le test échoue). Pas de variable `resultat` : l'appel échoue.
+- **Un test par chemin** : bon mot de passe / email inconnu / mauvais mot de passe. Expérience : sans le `!`, les tests 1 et 3 échouent, le 2 passe quand même (il s'arrête avant `matches`) → un seul test ne suffit pas.
+- Tester le cas **le plus proche** du bon (`unmotdepasselon`, une lettre en moins) et envoyer `Ilyas@Test.com` vérifie aussi la normalisation.
+- Erreur « méthode introuvable » qui ressemble à un import manquant : souvent une **parenthèse mal fermée**.
+
+---
+
+## 17. Un CRUD REST : l'exemple des comptes
+
+(séance 14)
+
+### 17.1 Les 5 endpoints
+
+| Endpoint | Corps envoyé | Réponse |
+|---|---|---|
+| `POST /accounts` | `AccountRequest` | **201** + le compte |
+| `GET /accounts` | rien (juste le jeton) | **200** + mes comptes |
+| `GET /accounts/{id}` | rien (l'id dans l'URL) | **200** + le compte, **404** s'il n'existe pas **ou** n'est pas à moi |
+| `PUT /accounts/{id}` | `AccountRequest` | **200** + le compte modifié |
+| `DELETE /accounts/{id}` | rien | **204**, rien |
+
+- **404 plutôt que 403** : un 403 avouerait « ce compte existe, mais pas à toi » (même idée que l'énumération d'utilisateurs).
+- **`PUT` renvoie la ressource, `DELETE` non** : après une modif, le serveur a pu **compléter** ce que le front a envoyé (`initialBalance` absent → 0, `id`, `currency`, `createdAt`) → la réponse = **la vérité de la base**. Après une suppression, il n'y a plus rien à montrer ; le front sait déjà ce qu'il a supprimé.
+- **Nommage** : `...Request` = ce qui **entre**, `...Response` = ce qui **sort**. **Un seul `AccountRequest`** pour créer et modifier : champs identiques ; choix assumé de laisser modifier le solde initial (corriger une erreur de saisie). Si les deux divergent un jour → `CreateAccountRequest` / `UpdateAccountRequest`.
+
+### 17.2 D'où viennent les données : `@PathVariable`, `@RequestParam`, `@RequestBody`
+
+| Annotation | D'où | Exemple | Sert à |
+|---|---|---|---|
+| `@PathVariable` | un morceau du **chemin** | `/accounts/3f2a…` | désigner **une** ressource |
+| `@RequestParam` | après le **`?`** | `/transactions?from=2026-10-01` | **filtrer** une liste |
+| `@RequestBody` | le **JSON** du corps | `{"name":"Livret A",...}` | envoyer des données |
+
+`@GetMapping("/{id}")` + `@PathVariable UUID id` : même nom des deux côtés ; Spring convertit en UUID (sinon 400).
+
+### 17.3 Les DTO des comptes
+
+- `AccountRequest` : `@NotNull` sur l'enum `type` (`@NotBlank` = texte seulement) ; **pas** de « positif » sur `initialBalance` (découvert possible) ; `@Digits(integer = 10, fraction = 2)` = la colonne `NUMERIC(12,2)` (sinon un trop grand montant → 500).
+- `AccountResponse` : pas de `user` (le front sait qui il est) ; `static AccountResponse from(Account)` = la conversion entité → DTO **à un seul endroit** (appel : `AccountResponse.from(compte)` ou `AccountResponse::from`).
+
+### 17.4 Le service : la sécurité au centre
+
+```java
+public AccountResponse creer(UUID userId, AccountRequest request) {
+    Account account = new Account(userRepository.getReferenceById(userId), request.name(), request.type(), request.initialBalance());
+    accountRepository.save(account);
+    return AccountResponse.from(account);
+}
+
+public List<AccountResponse> lister(UUID userId) {
+    return accountRepository.findAllByUserId(userId).stream()
+            .map(AccountResponse::from)          // = account -> AccountResponse.from(account)
+            .toList();
+}
+
+public AccountResponse lire(UUID userId, UUID id) { return AccountResponse.from(trouverCompte(userId, id)); }
+
+public AccountResponse modifier(UUID userId, UUID id, AccountRequest request) {
+    Account account = trouverCompte(userId, id);
+    account.modifier(request.name(), request.type(), request.initialBalance());
+    accountRepository.save(account);
+    return AccountResponse.from(account);
+}
+
+public void supprimer(UUID userId, UUID id) { accountRepository.delete(trouverCompte(userId, id)); }
+
+private Account trouverCompte(UUID userId, UUID id) {       // LA règle anti-IDOR, écrite une seule fois
+    return accountRepository.findByIdAndUserId(id, userId)    // ⚠️ ordre (id, userId) : deux UUID, inverser compile
+            .orElseThrow(RessourceIntrouvableException::new);
+}
+```
+- **`getReferenceById(userId)`** : un proxy `User` **sans requête SQL** ; suffisant car Hibernate n'a besoin que de la valeur de `user_id`, et l'id vient d'un jeton que **nous** avons signé.
+- **Une méthode métier plutôt que des setters** (`account.modifier(name, type, initialBalance)`) : les règles (le `null` → 0) restent à un seul endroit ; on n'ouvre que ce qui est modifiable (un `setUser` permettrait de déplacer le compte d'un autre = IDOR fait main) ; le nom dit l'intention.
+- **Repérer `AccountRepository.save` (interface) vs `accountRepository.save` (champ)** : dans IntelliJ, un champ est en violet.
+- **Supprimer un compte qui a des transactions** : `NO ACTION` → Postgres refuse → aujourd'hui **500** ; le bon code = **409** (« Ce compte contient des transactions »). À faire avec le CRUD des transactions (attention au cycle de packages `account` ↔ `transaction`).

@@ -41,4 +41,11 @@ public class GestionErreurs {
         probleme.setTitle("Identifiants invalides");
         return probleme;
     }
+
+    @ExceptionHandler(RessourceIntrouvableException.class)
+    public ProblemDetail ressourceIntrouvable(RessourceIntrouvableException e) {
+        ProblemDetail probleme = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, e.getMessage());
+        probleme.setTitle("Ressource introuvable");
+        return probleme;
+    }
 }
